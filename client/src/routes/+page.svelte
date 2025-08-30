@@ -9,6 +9,8 @@
   // Prevent duplicate submits and duplicate audio
   let inFlight = false;
   let audioEl = null;
+  // Resolver used to await recognition.onend when stopping recognition
+  let recognitionEndResolver = null;
 
   if (typeof window !== 'undefined') {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -18,7 +20,7 @@
 
     recognition.onresult = (event) => {
       let tempInterim = '';
-      finalTranscript = ''; // Reset final transcript on new result
+      // Do NOT reset finalTranscript here — keep accumulated final text across short pauses.
       for (let i = event.resultIndex; i < event.results.length; ++i) {
         if (event.results[i].isFinal) {
           finalTranscript += event.results[i][0].transcript;
@@ -36,6 +38,16 @@
     };
 
     recognition.onend = () => {
+      // Resolve any waiter that is awaiting the recognition end
+      try {
+        if (recognitionEndResolver) {
+          recognitionEndResolver();
+          recognitionEndResolver = null;
+        }
+      } catch (e) {
+        console.error('Recognition end resolver error', e);
+      }
+
       isListening = false;
       if (status === 'Listening...') {
         status = 'Hold to Speak';
@@ -59,69 +71,93 @@
   }
 
   async function handleOrbRelease() {
-    // Guard to prevent duplicate releases (mouseup + mouseleave, etc.)
-    if (!isListening || inFlight) return;
+    // Prevent duplicate in-flight requests (allows processing even if recognition.onend already fired)
+    if (inFlight) return;
     inFlight = true;
 
     recognition.stop();
     status = 'Thinking...';
 
-    // A short delay to ensure the final transcript is captured
-    setTimeout(async () => {
-      const capturedTranscript = finalTranscript.trim();
-      if (!capturedTranscript) {
-        console.log("No speech detected.");
-        status = 'Hold to Speak';
-        inFlight = false;
-        return;
-      }
-
-      const userMessage = { role: 'user', text: capturedTranscript };
-      conversationHistory = [...conversationHistory, userMessage];
-
-      try {
-        const response = await fetch('http://localhost:8000/api/conversation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: capturedTranscript, history: conversationHistory }),
-        });
-
-        if (!response.ok) {
-          throw new Error(`Network response was not ok: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-
-        // Append model reply only if it's not already the last entry
-        const aiMessage = { role: 'model', text: data.text };
-        const last = conversationHistory[conversationHistory.length - 1];
-        if (!last || last.role !== 'model' || last.text !== data.text) {
-          conversationHistory = [...conversationHistory, aiMessage];
-        }
-
-        // Play audio once: stop any previous playback first
-        try {
-          if (audioEl) {
-            audioEl.pause();
-            audioEl.currentTime = 0;
+    // Wait for recognition.onend to run so finalTranscript is fully populated.
+    try {
+      await new Promise((resolve) => {
+        let finished = false;
+        // Safety timeout in case onend doesn't fire
+        const to = setTimeout(() => {
+          if (!finished) {
+            finished = true;
+            recognitionEndResolver = null;
+            resolve();
           }
-          audioEl = new Audio(`http://localhost:8000${data.audio_url}`);
-          await audioEl.play();
-        } catch (e) {
-          console.error('Error playing audio', e);
-        }
+        }, 1000);
+        recognitionEndResolver = () => {
+          if (!finished) {
+            finished = true;
+            clearTimeout(to);
+            recognitionEndResolver = null;
+            resolve();
+          }
+        };
+      });
+    } catch (e) {
+      // ignore and continue to read finalTranscript
+      console.warn('Waiting for recognition end failed:', e);
+    }
 
-      } catch (error) {
-        console.error('There was a problem with the fetch operation:', error);
-        status = 'Error!';
-        conversationHistory = [...conversationHistory, { role: 'system', text: 'Sorry, I encountered an error.' }];
-      } finally {
-        status = 'Hold to Speak';
-        finalTranscript = '';
-        interimTranscript = '';
-        inFlight = false;
+    const capturedTranscript = finalTranscript.trim();
+    if (!capturedTranscript) {
+      console.log("No speech detected.");
+      status = 'Hold to Speak';
+      inFlight = false;
+      return;
+    }
+
+    const userMessage = { role: 'user', text: capturedTranscript };
+    conversationHistory = [...conversationHistory, userMessage];
+
+    try {
+      const response = await fetch('http://localhost:8000/api/conversation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: capturedTranscript, history: conversationHistory }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Network response was not ok: ${response.statusText}`);
       }
-    }, 250);
+
+      const data = await response.json();
+
+      // Append model reply only if it's not already the last entry
+      const aiMessage = { role: 'model', text: data.text };
+      const last = conversationHistory[conversationHistory.length - 1];
+      if (!last || last.role !== 'model' || last.text !== data.text) {
+        conversationHistory = [...conversationHistory, aiMessage];
+      }
+
+      // Play audio once: stop any previous playback first
+      try {
+        if (audioEl) {
+          audioEl.pause();
+          audioEl.currentTime = 0;
+        }
+        audioEl = new Audio(`http://localhost:8000${data.audio_url}`);
+        await audioEl.play();
+      } catch (e) {
+        console.error('Error playing audio', e);
+      }
+
+    } catch (error) {
+      console.error('There was a problem with the fetch operation:', error);
+      status = 'Error!';
+      conversationHistory = [...conversationHistory, { role: 'system', text: 'Sorry, I encountered an error.' }];
+    } finally {
+      status = 'Hold to Speak';
+      // Clear transcripts only after we've recorded them into history
+      finalTranscript = '';
+      interimTranscript = '';
+      inFlight = false;
+    }
   }
 </script>
 
