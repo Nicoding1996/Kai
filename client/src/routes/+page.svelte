@@ -36,18 +36,59 @@
   // One-time hint bubble when conversation ends
   let showDownloadHint = false;
 
-  // Enable summary download only when there's at least one full turn (user + Kai)
-  // and the last message is from Kai (so the turn is complete).
-  $: canSummarize = (() => {
-    if (!Array.isArray(conversationHistory) || conversationHistory.length < 2) return false;
-    let hasUser = false, hasModel = false;
-    for (const m of conversationHistory) {
-      if (m?.role === 'user') hasUser = true;
-      if (m?.role === 'model') hasModel = true;
+  // Mode toggle: Focus Mode (default) vs Hands-Free Mode
+  let isHandsFreeMode = false;
+
+  // Computed ARIA label for orb based on mode/state
+  $: orbAriaLabel = isHandsFreeMode
+    ? (isListening ? 'Listening hands-free; auto-stops on silence' : 'Tap to start hands-free listening')
+    : 'Tap to start or stop listening';
+
+  // Mode label text beside the toggle (requested "Hands-Free" / "Tap" text)
+  $: modeLabel = isHandsFreeMode ? 'Hands‑Free' : 'Tap';
+  $: modeHint = isHandsFreeMode ? 'Auto-stop on silence' : 'Tap to start/stop';
+
+  // Small toast when switching modes
+  let showModeToast = false;
+  let modeToast = '';
+  let modeToastTimer = null;
+
+  async function toggleMode() {
+    // Proactively request mic permission on this user gesture
+    const hasPermission = await ensureMicPermission();
+    if (!hasPermission) return;
+
+    // Flip mode
+    isHandsFreeMode = !isHandsFreeMode;
+
+    // Show quick toast describing the active mode
+    modeToast = isHandsFreeMode ? 'Hands‑Free Mode' : 'Focus Mode (Tap)';
+    showModeToast = true;
+    if (modeToastTimer) clearTimeout(modeToastTimer);
+    modeToastTimer = setTimeout(() => (showModeToast = false), 1400);
+
+    // Update status if currently listening to avoid confusion
+    if (isListening) {
+        status = isHandsFreeMode ? 'Speak now' : 'Tap to Stop';
     }
-    const last = conversationHistory[conversationHistory.length - 1];
-    return hasUser && hasModel && last?.role === 'model';
-  })();
+
+    // If idle and switching to Hands-Free, auto-open the mic
+    if (isHandsFreeMode && !speaking && !isListening && !inFlight) {
+        beginListening(true);
+    }
+
+    // Adjust silence timer behavior mid-turn depending on mode
+    if (isListening) {
+        if (isHandsFreeMode) {
+            armSilenceTimer();
+        } else {
+            if (silenceTimer) {
+                clearTimeout(silenceTimer);
+                silenceTimer = null;
+            }
+        }
+    }
+}
 
   // Microphone visualisation (react while the user is speaking)
   let micActive = false;
@@ -68,6 +109,18 @@
       }
     } catch (e) {
       console.warn('AudioContext resume failed', e);
+    }
+  }
+
+  // Prompt for mic permission under a user gesture; stop tracks immediately
+  async function ensureMicPermission() {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      s.getTracks().forEach(t => t.stop());
+      return true;
+    } catch (e) {
+      console.warn('Microphone permission not granted', e);
+      return false;
     }
   }
 
@@ -111,7 +164,8 @@
   let previousSubtitle = '';
 
   // Auto-stop configuration
-  const SILENCE_TIMEOUT_MS = 6500; // stop after 6.5s of silence
+  // Hands‑Free uses a short silence timeout; Focus (Tap) mode does not auto-stop on silence.
+  const HANDS_FREE_SILENCE_TIMEOUT_MS = 2500; // ~2.5s silence
   const MAX_LISTEN_MS = 30000;     // hard cap: 30s per turn
 
   let silenceTimer = null;
@@ -130,13 +184,17 @@
 
   function armSilenceTimer() {
     if (silenceTimer) clearTimeout(silenceTimer);
+    // Only auto-stop on silence in Hands‑Free mode; Focus (Tap) relies on manual stop.
+    if (!isHandsFreeMode) {
+      return;
+    }
     silenceTimer = setTimeout(() => {
       if (isListening && !inFlight) {
         // Trigger stop+process on prolonged silence
         isListening = false;
         handleOrbRelease();
       }
-    }, SILENCE_TIMEOUT_MS);
+    }, HANDS_FREE_SILENCE_TIMEOUT_MS);
   }
 
   function armMaxListenTimer() {
@@ -251,7 +309,7 @@
 
     recognition.onstart = () => {
       isListening = true;
-      status = 'Tap to Stop';
+      status = isHandsFreeMode ? 'Speak now' : 'Tap to Stop';
       // Arm timers when listening begins
       armSilenceTimer();
       armMaxListenTimer();
@@ -284,7 +342,33 @@
     };
   }
 
-  // Tap-to-toggle handler
+  // Begin listening via Web Speech API
+  async function beginListening(auto = false) {
+    if (inFlight || isListening) return;
+    if (!recognition) {
+      console.warn('SpeechRecognition not available');
+      return;
+    }
+    try {
+      await ensureAudioCtx();
+      const hasPermission = await ensureMicPermission();
+      if (!hasPermission) {
+        status = 'Microphone permission needed';
+        return;
+      }
+      // Reset transcripts for a new turn
+      interimTranscript = '';
+      finalTranscript = '';
+      // Optionally start a mic visualizer
+      try { await startMicViz(); } catch {}
+      recognition.start();
+      status = isHandsFreeMode ? 'Speak now' : 'Tap to Stop';
+    } catch (e) {
+      console.warn('Failed to start listening', e);
+    }
+  }
+
+  // Tap handler: Focus Mode = toggle start/stop, Hands-Free = tap once to start (auto-stops on silence)
   function handleOrbClick() {
     if (inFlight) return;
 
@@ -299,16 +383,11 @@
       conversationEnded = false;
 
       // Start listening
-      finalTranscript = '';
-      interimTranscript = '';
-      isListening = true;
-      status = 'Tap to Stop';
-
-      // Prime/resume AudioContext under a click user-gesture to satisfy autoplay policies
-      ensureAudioCtx();
-      recognition.start();
+      beginListening();
     } else {
-      // Stop and process captured speech
+      // In Hands-Free mode, ignore tap while listening; auto-stop will handle submission
+      if (isHandsFreeMode) return;
+      // Focus Mode: Stop and process captured speech immediately
       isListening = false;
       handleOrbRelease();
     }
@@ -395,11 +474,25 @@
 
       // Play audio once: stop any previous playback first
       try {
-        await playAudioFromUrl(`http://localhost:8000${data.audio_url}`, () => {
-          // After each AI turn finishes, show Tap to Speak
+        if (data.audio_url) {
+          await playAudioFromUrl(`http://localhost:8000${data.audio_url}`, () => {
+            // After each AI turn finishes
+            hasGreeted = true;
+            if (isHandsFreeMode && !isListening && !inFlight) {
+              beginListening(true);
+            } else {
+              status = 'Tap to Speak';
+            }
+          });
+        } else {
+          // No audio available (e.g., TTS quota). Continue flow silently.
           hasGreeted = true;
-          status = 'Tap to Speak';
-        });
+          if (isHandsFreeMode && !isListening && !inFlight) {
+            beginListening(true);
+          } else {
+            status = 'Tap to Speak';
+          }
+        }
       } catch (e) {
         console.error('Error playing audio', e);
       }
@@ -469,7 +562,7 @@
   // Download session summary as a Markdown file (with feedback)
   async function handleDownload() {
     try {
-      if (!canSummarize || downloading) return;
+      if (!conversationEnded || downloading) return;
       downloading = true;
 
       const response = await fetch('http://localhost:8000/api/summary', {
@@ -506,7 +599,7 @@
   // Download session summary as a PDF file (server-rendered)
   async function handleDownloadPdf() {
     try {
-      if (!canSummarize || downloading) return;
+      if (!conversationEnded || downloading) return;
       downloading = true;
 
       const response = await fetch('http://localhost:8000/api/summary_pdf', {
@@ -566,7 +659,12 @@
         const { audio_url } = await res.json();
         await playAudioFromUrl(`http://localhost:8000${audio_url}`, () => {
           hasGreeted = true;
-          status = 'Tap to Speak';
+          if (isHandsFreeMode && !isListening && !inFlight) {
+            // Auto-open mic after greeting in Hands‑Free
+            beginListening(true);
+          } else {
+            status = 'Tap to Speak';
+          }
         });
       } else {
         // If TTS fails, still advance UI
@@ -607,7 +705,7 @@
       class:breathing-active={isListening || speaking}
       on:click={handleOrbClick}
       role="button"
-      aria-label="Tap to start or stop listening"
+      aria-label={orbAriaLabel}
       tabindex="0"
       style={`--orb-scale:${(1 + orbLevel * 0.10).toFixed(3)}; --orb-glow:${Math.round(orbLevel * 100)}px;`}
     >
@@ -632,6 +730,45 @@
     </div>
   </main>
 
+  <!-- Mode Switch (bottom-left) -->
+  <div class="fixed bottom-5 left-5 flex items-center gap-2">
+    <button
+      class="w-11 h-11 rounded-full bg-gray-800/80 hover:bg-gray-700 transition-colors flex items-center justify-center border border-gray-700"
+      on:click={toggleMode}
+      aria-label={isHandsFreeMode ? 'Switch to Focus Mode' : 'Switch to Hands-Free Mode'}
+      title={isHandsFreeMode ? 'Hands-Free Mode' : 'Focus Mode'}
+    >
+      {#if isHandsFreeMode}
+        <!-- Hands-Free icon: microphone with waves -->
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-purple-300 transition-transform duration-150 hover:scale-110" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M12 14a4 4 0 004-4V7a4 4 0 10-8 0v3a4 4 0 004 4z"/>
+          <path d="M5 11a1 1 0 10-2 0 9 9 0 0016 6.32V19a1 1 0 112 0v-1.68A9 9 0 005 11z"/>
+        </svg>
+      {:else}
+        <!-- Focus Mode icon: target -->
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-gray-200 transition-transform duration-150 hover:scale-110" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M12 2a10 10 0 1010 10A10.011 10.011 0 0012 2zm0 18a8 8 0 118-8 8.009 8.009 0 01-8 8zm0-14a6 6 0 106 6 6.006 6.006 0 00-6-6zm0 9a3 3 0 113-3 3.004 3.004 0 01-3 3z"/>
+        </svg>
+      {/if}
+    </button>
+
+    <!-- Readable text label toggle -->
+    <button
+      class="h-11 px-3 rounded-full border border-gray-700 bg-gray-800/80 hover:bg-gray-700 text-sm text-gray-100 transition-colors shadow-sm"
+      on:click={toggleMode}
+      aria-label={isHandsFreeMode ? 'Switch to Focus Mode' : 'Switch to Hands-Free Mode'}
+      title={modeHint}
+    >
+      {modeLabel}
+    </button>
+  </div>
+
+  {#if showModeToast}
+    <div class="fixed bottom-20 left-5 text-sm text-gray-200 bg-gray-800/80 px-3 py-1 rounded-md border border-gray-700 shadow">
+      {modeToast}
+    </div>
+  {/if}
+
   <!-- Action Icons (bottom-right) -->
   <div class="fixed bottom-5 right-5 flex items-center gap-3">
     <!-- Show/Hide History -->
@@ -651,8 +788,8 @@
     <button
       class="w-11 h-11 rounded-full bg-purple-700 hover:bg-purple-600 transition-colors flex items-center justify-center shadow-md disabled:opacity-50 disabled:cursor-not-allowed relative"
       class:animate-pulse={conversationEnded}
-      on:click={() => { if (canSummarize && !downloading) showDownloadMenu = !showDownloadMenu; }}
-      disabled={!canSummarize || downloading}
+      on:click={() => { if (conversationEnded && !downloading) showDownloadMenu = !showDownloadMenu; }}
+      disabled={!conversationEnded || downloading}
       aria-label="Download summary"
       title="Download summary"
     >

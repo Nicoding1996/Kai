@@ -6,8 +6,9 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from elevenlabs.client import ElevenLabs
 import uuid
+from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
-
+ 
 # PDF generation (simple Markdown-ish rendering)
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
@@ -83,8 +84,8 @@ class ConversationRequest(BaseModel):
 
 class ConversationResponse(BaseModel):
     text: str
-    audio_url: str
-
+    audio_url: Optional[str] = None
+ 
 # New model for summary requests
 class SummaryRequest(BaseModel):
     history: list
@@ -176,21 +177,25 @@ Your Coaching Framework (GROW Model enhanced with Well-Formed Outcome):
             # Provide a sane fallback so the client doesn't crash
             ai_text_response = "I created your summary, but the response format was unexpected."
 
-        voice_id = os.getenv("ELEVENLABS_VOICE_ID")
-        audio_stream = elevenlabs_client.text_to_speech.stream(
-            text=ai_text_response,
-            voice_id=voice_id,
-        )
-
-        file_name = f"{uuid.uuid4()}.mp3"
-        file_path = f"server/static/audio/{file_name}"
-        
-        with open(file_path, "wb") as f:
-            for chunk in audio_stream:
-                f.write(chunk)
-        
-        audio_url = f"/static/audio/{file_name}"
-
+        # Attempt to synthesize audio, but don't fail the whole request if TTS is unavailable
+        audio_url = None
+        try:
+            voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+            audio_stream = elevenlabs_client.text_to_speech.stream(
+                text=ai_text_response,
+                voice_id=voice_id,
+            )
+ 
+            file_name = f"{uuid.uuid4()}.mp3"
+            file_path = f"server/static/audio/{file_name}"
+            with open(file_path, "wb") as f:
+                for chunk in audio_stream:
+                    f.write(chunk)
+            audio_url = f"/static/audio/{file_name}"
+        except Exception as tts_err:
+            # Log and continue without audio (e.g., quota exceeded)
+            print(f"TTS generation failed in conversation: {tts_err}")
+ 
         return ConversationResponse(text=ai_text_response, audio_url=audio_url)
 
     except requests.exceptions.HTTPError as http_err:
@@ -383,10 +388,25 @@ async def tts(request: TTSRequest):
         if not text:
             raise HTTPException(status_code=400, detail="Text is required.")
         voice_id = os.getenv("ELEVENLABS_VOICE_ID")
-        audio_stream = elevenlabs_client.text_to_speech.stream(
-            text=text,
-            voice_id=voice_id,
-        )
+ 
+        # Call provider with specific error mapping
+        try:
+            audio_stream = elevenlabs_client.text_to_speech.stream(
+                text=text,
+                voice_id=voice_id,
+            )
+        except Exception as sdk_err:
+            msg = str(sdk_err)
+            print(f"TTS provider error: {msg}")
+            lowered = msg.lower()
+            if "quota" in lowered or "quota_exceeded" in lowered:
+                # Map quota issues to 429 so the client can degrade gracefully
+                raise HTTPException(status_code=429, detail="TTS quota exceeded")
+            if "401" in lowered or "unauthorized" in lowered:
+                raise HTTPException(status_code=401, detail="TTS unauthorized")
+            # Default: bad gateway from upstream
+            raise HTTPException(status_code=502, detail="Upstream TTS provider error")
+ 
         file_name = f"{uuid.uuid4()}.mp3"
         file_path = f"server/static/audio/{file_name}"
         with open(file_path, "wb") as f:
@@ -394,8 +414,11 @@ async def tts(request: TTSRequest):
                 f.write(chunk)
         audio_url = f"/static/audio/{file_name}"
         return {"audio_url": audio_url}
+    except HTTPException:
+        # Re-raise mapped HTTP errors
+        raise
     except Exception as e:
-        print(f"TTS error: {e}")
+        print("TTS route error:", e)
         raise HTTPException(status_code=500, detail="Failed to synthesize speech.")
 
 if __name__ == "__main__":
