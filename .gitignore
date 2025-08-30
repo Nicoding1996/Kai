@@ -33,3 +33,6 @@ __pycache__/
 # Ignore generated audio files, but keep the directory
 server/static/audio/*
 !.gitkeep
+
+# Ignore generated session documents (PDFs)
+server/static/docs/*.pdf
