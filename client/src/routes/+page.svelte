@@ -183,8 +183,8 @@
   // Auto-stop configuration
   // Hands‑Free uses a short silence timeout; Focus (Tap) mode does not auto-stop on silence.
   const HANDS_FREE_SILENCE_TIMEOUT_MS = 3500; // ~3.5s after speech activity
-  const INITIAL_HANDS_FREE_GRACE_MS = 4500;   // extra time right after coach finishes
-  const COACH_TO_MIC_DELAY_MS = 800;          // small delay before opening mic after AI audio
+  const INITIAL_HANDS_FREE_GRACE_MS = 7000;   // longer grace after coach finishes
+  const COACH_TO_MIC_DELAY_MS = 1200;         // slightly longer delay before opening mic
   const MAX_LISTEN_MS = 30000;     // hard cap: 30s per turn
 
   let silenceTimer = null;
@@ -745,12 +745,8 @@ lastAIAudioText = data.text || '';
         const { audio_url } = await res.json();
         await playAudioFromUrl(`http://localhost:8000${audio_url}`, () => {
           hasGreeted = true;
-          if (isHandsFreeMode && !isListening && !inFlight) {
-            // Auto-open mic after greeting in Hands‑Free
-            scheduleAutoListen();
-          } else {
-            status = 'Tap to Speak';
-          }
+          // Do NOT auto-open mic after the initial greeting to avoid echo.
+          status = 'Tap to Speak';
         });
       } else {
         // If TTS fails, still advance UI
