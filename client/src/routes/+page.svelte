@@ -170,6 +170,22 @@
     }
   }
 
+  // Ensure coach audio stops immediately (and visualizer) before starting to listen
+  function stopCoachAudio() {
+    try {
+      if (audioEl) {
+        audioEl.onplay = null;
+        audioEl.onpause = null;
+        audioEl.onended = null;
+        audioEl.onerror = null;
+        audioEl.pause();
+        audioEl.currentTime = 0;
+      }
+    } catch {}
+    stopSpeakingViz();
+    audioEl = null;
+  }
+
   function speakingAnimationLoop() {
     // Read AI playback energy
     let aiLevel = 0;
@@ -258,14 +274,23 @@
   // Tap-to-toggle handler
   function handleOrbClick() {
     if (inFlight) return;
+
     if (!isListening) {
+      // If coach is currently speaking, stop that audio immediately before we start listening
+      if (speaking || audioEl) {
+        stopCoachAudio();
+      }
+
+      // Close any open menus and reset end-of-convo highlight
+      showDownloadMenu = false;
+      conversationEnded = false;
+
       // Start listening
       finalTranscript = '';
       interimTranscript = '';
       isListening = true;
       status = 'Tap to Stop';
-      // Clear any previous end-of-conversation highlight when user starts a new turn
-      conversationEnded = false;
+
       // Prime/resume AudioContext under a click user-gesture to satisfy autoplay policies
       ensureAudioCtx();
       recognition.start();
