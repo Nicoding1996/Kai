@@ -36,6 +36,19 @@
   // One-time hint bubble when conversation ends
   let showDownloadHint = false;
 
+  // Enable summary download only when there's at least one full turn (user + Kai)
+  // and the last message is from Kai (so the turn is complete).
+  $: canSummarize = (() => {
+    if (!Array.isArray(conversationHistory) || conversationHistory.length < 2) return false;
+    let hasUser = false, hasModel = false;
+    for (const m of conversationHistory) {
+      if (m?.role === 'user') hasUser = true;
+      if (m?.role === 'model') hasModel = true;
+    }
+    const last = conversationHistory[conversationHistory.length - 1];
+    return hasUser && hasModel && last?.role === 'model';
+  })();
+
   // Microphone visualisation (react while the user is speaking)
   let micActive = false;
   let micStream;
@@ -456,7 +469,7 @@
   // Download session summary as a Markdown file (with feedback)
   async function handleDownload() {
     try {
-      if (!conversationHistory || conversationHistory.length === 0) return;
+      if (!canSummarize || downloading) return;
       downloading = true;
 
       const response = await fetch('http://localhost:8000/api/summary', {
@@ -493,7 +506,7 @@
   // Download session summary as a PDF file (server-rendered)
   async function handleDownloadPdf() {
     try {
-      if (!conversationHistory || conversationHistory.length === 0) return;
+      if (!canSummarize || downloading) return;
       downloading = true;
 
       const response = await fetch('http://localhost:8000/api/summary_pdf', {
@@ -638,8 +651,8 @@
     <button
       class="w-11 h-11 rounded-full bg-purple-700 hover:bg-purple-600 transition-colors flex items-center justify-center shadow-md disabled:opacity-50 disabled:cursor-not-allowed relative"
       class:animate-pulse={conversationEnded}
-      on:click={() => (showDownloadMenu = !showDownloadMenu)}
-      disabled={conversationHistory.length === 0}
+      on:click={() => { if (canSummarize && !downloading) showDownloadMenu = !showDownloadMenu; }}
+      disabled={!canSummarize || downloading}
       aria-label="Download summary"
       title="Download summary"
     >
