@@ -1,10 +1,15 @@
 <script>
+  import { onMount } from 'svelte';
+
   let recognition;
   let interimTranscript = '';
   let finalTranscript = '';
   let isListening = false;
   let status = 'Tap to Start';
   let conversationHistory = [];
+
+  // Track whether we've already greeted (affects orb label flow)
+  let hasGreeted = false;
 
   // Prevent duplicate submits and duplicate audio
   let inFlight = false;
@@ -18,6 +23,9 @@
   let rafId = 0;
   let speaking = false; // AI is speaking
   let orbLevel = 0; // 0..1 intensity for glow/scale
+
+  // Small UI feedback for downloads
+  let downloading = false;
 
   // Microphone visualisation (react while the user is speaking)
   let micActive = false;
@@ -165,29 +173,14 @@
       aiLevel = Math.min(1, Math.max(0, (avg - 10) / 100));
     }
 
-    // Read microphone energy (RMS of time-domain)
-    let micLevel = 0;
-    if (micActive && micAnalyser) {
-      if (!micDataArray) micDataArray = new Uint8Array(micAnalyser.fftSize);
-      micAnalyser.getByteTimeDomainData(micDataArray);
-      let sumSq = 0;
-      for (let i = 0; i < micDataArray.length; i++) {
-        const v = (micDataArray[i] - 128) / 128;
-        sumSq += v * v;
-      }
-      const rms = Math.sqrt(sumSq / (micDataArray.length || 1));
-      // Map RMS (~0..~0.5) into 0..1 with a small floor
-      micLevel = Math.min(1, Math.max(0, (rms - 0.02) / 0.2));
-    }
+    // (Optional) mic hooks could be added here; currently not active in this build.
 
-    // Combine signals; emphasize mic slightly to feel responsive while talking
-    const combined = Math.max(aiLevel, micLevel * 1.2);
+    const combined = aiLevel;
     orbLevel = combined;
 
-    if (speaking || micActive) {
+    if (speaking) {
       rafId = requestAnimationFrame(speakingAnimationLoop);
     } else {
-      // No sources active; stop loop
       if (rafId) {
         cancelAnimationFrame(rafId);
         rafId = 0;
@@ -242,14 +235,14 @@
 
       isListening = false;
       if (status === 'Tap to Stop') {
-        status = 'Tap to Start';
+        status = hasGreeted ? 'Tap to Speak' : 'Tap to Start';
       }
     };
 
     recognition.onerror = (event) => {
       console.error('Speech recognition error', event.error);
       isListening = false;
-      status = 'Tap to Start';
+      status = hasGreeted ? 'Tap to Speak' : 'Tap to Start';
     };
   }
 
@@ -344,44 +337,11 @@
 
       // Play audio once: stop any previous playback first
       try {
-        if (audioEl) {
-          audioEl.pause();
-          audioEl.currentTime = 0;
-        }
-        audioEl = new Audio(`http://localhost:8000${data.audio_url}`);
-        audioEl.crossOrigin = 'anonymous';
-        audioEl.muted = false;
-        audioEl.volume = 1;
-
-        // Initialize Web Audio graph and speaking animation
-        await ensureAudioCtx();
-        if (sourceNode) {
-          try { sourceNode.disconnect(); } catch {}
-        }
-        sourceNode = audioCtx.createMediaElementSource(audioEl);
-        analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 256;
-        dataArray = new Uint8Array(analyser.frequencyBinCount);
-        // Route audio through analyser to destination
-        sourceNode.connect(analyser);
-        analyser.connect(audioCtx.destination);
-
-        audioEl.onplay = async () => {
-          try {
-            if (audioCtx.state === 'suspended') await audioCtx.resume();
-          } catch {}
-          speaking = true;
-          speakingAnimationLoop();
-        };
-        audioEl.onerror = (e) => {
-          console.error('Audio element error', e, audioEl.error);
-          stopSpeakingViz();
-        };
-        const stop = () => { stopSpeakingViz(); };
-        audioEl.onpause = stop;
-        audioEl.onended = stop;
-
-        await audioEl.play();
+        await playAudioFromUrl(`http://localhost:8000${data.audio_url}`, () => {
+          // After each AI turn finishes, show Tap to Speak
+          hasGreeted = true;
+          status = 'Tap to Speak';
+        });
       } catch (e) {
         console.error('Error playing audio', e);
       }
@@ -391,7 +351,8 @@
       conversationHistory = [...conversationHistory, { role: 'system', text: 'Sorry, I encountered an error.' }];
       setSubtitleFromHistory();
     } finally {
-      status = 'Tap to Start';
+      status = 'Tap to Speak';
+      hasGreeted = true;
       // Clear transcripts only after we've recorded them into history
       finalTranscript = '';
       interimTranscript = '';
@@ -399,10 +360,59 @@
     }
   }
 
-  // Download session summary as a text file
+  // Common audio playback + analyser hook
+  async function playAudioFromUrl(url, onEndedCb = null) {
+    if (audioEl) {
+      try {
+        audioEl.pause();
+        audioEl.currentTime = 0;
+      } catch {}
+    }
+    audioEl = new Audio(url);
+    audioEl.crossOrigin = 'anonymous';
+    audioEl.muted = false;
+    audioEl.volume = 1;
+
+    await ensureAudioCtx();
+    if (sourceNode) {
+      try { sourceNode.disconnect(); } catch {}
+    }
+    sourceNode = audioCtx.createMediaElementSource(audioEl);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+    sourceNode.connect(analyser);
+    analyser.connect(audioCtx.destination);
+
+    audioEl.onplay = async () => {
+      try {
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+      } catch {}
+      speaking = true;
+      if (!rafId) rafId = requestAnimationFrame(speakingAnimationLoop);
+      else speakingAnimationLoop();
+    };
+    const stop = () => {
+      stopSpeakingViz();
+      if (typeof onEndedCb === 'function') {
+        onEndedCb();
+      }
+    };
+    audioEl.onpause = stop;
+    audioEl.onended = stop;
+    audioEl.onerror = (e) => {
+      console.error('Audio element error', e, audioEl.error);
+      stopSpeakingViz();
+    };
+
+    await audioEl.play();
+  }
+
+  // Download session summary as a text file (with feedback)
   async function handleDownload() {
     try {
       if (!conversationHistory || conversationHistory.length === 0) return;
+      downloading = true;
 
       const response = await fetch('http://localhost:8000/api/summary', {
         method: 'POST',
@@ -429,15 +439,57 @@
       URL.revokeObjectURL(url);
     } catch (e) {
       console.error('Failed to download summary', e);
+    } finally {
+      // brief feedback window
+      setTimeout(() => (downloading = false), 600);
     }
   }
+
+  // Initial greeting: subtitle + TTS playback
+  onMount(async () => {
+    try {
+      const greeting = "Hello, I'm Kai. It's good to hear from you. What's on your mind today?";
+      // Show greeting in subtitle and history
+      const aiGreeting = { role: 'model', text: greeting };
+      conversationHistory = [...conversationHistory, aiGreeting];
+      // Push to floating subtitles
+      const last = conversationHistory[conversationHistory.length - 1];
+      if (last) {
+        previousSubtitle = '';
+        currentSubtitle = last.text;
+      }
+      // Request TTS from backend
+      const res = await fetch('http://localhost:8000/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: greeting })
+      });
+      if (res.ok) {
+        const { audio_url } = await res.json();
+        await playAudioFromUrl(`http://localhost:8000${audio_url}`, () => {
+          hasGreeted = true;
+          status = 'Tap to Speak';
+        });
+      } else {
+        // If TTS fails, still advance UI
+        hasGreeted = true;
+        status = 'Tap to Speak';
+      }
+    } catch (e) {
+      console.warn('Initial greeting failed', e);
+      hasGreeted = true;
+      status = 'Tap to Speak';
+    }
+  });
 </script>
 
 <!-- Minimalist, immersive layout -->
 <div class="min-h-screen bg-gray-900 text-white font-sans flex flex-col overflow-hidden">
   <!-- Title -->
   <header class="py-6 text-center">
-    <h1 class="text-3xl md:text-4xl font-bold">Kai - Your AI NLP Coach</h1>
+    <h1 class="text-4xl md:text-5xl font-extrabold tracking-wide" style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial;">
+      Kai - Your AI Coach
+    </h1>
   </header>
 
   <!-- Centered Orb and Floating Subtitles -->
@@ -450,7 +502,7 @@
       role="button"
       aria-label="Tap to start or stop listening"
       tabindex="0"
-      style={`--orb-scale:${(1 + orbLevel * 0.06).toFixed(3)}; --orb-glow:${Math.round(orbLevel * 60)}px;`}
+      style={`--orb-scale:${(1 + orbLevel * 0.10).toFixed(3)}; --orb-glow:${Math.round(orbLevel * 100)}px;`}
     >
       <!-- Inner label -->
       <div class="absolute inset-0 rounded-full flex items-center justify-center text-white font-semibold">
@@ -482,9 +534,9 @@
       aria-label="Show history"
       title="Show history"
     >
-      <!-- Chat bubble icon -->
-      <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-gray-200" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M7 8h10M7 12h7m7-1a8 8 0 10-15.1 3.9L3 20l3.1-.9A8 8 0 1021 11z" />
+      <!-- High-quality chat bubble icon -->
+      <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-gray-100 transition-transform duration-150 hover:scale-110" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M2 12.75C2 7.365 6.477 3 12 3s10 4.365 10 9.75S17.523 22.5 12 22.5c-1.29 0-2.529-.2-3.679-.574L4 23l1.21-3.239C3.37 18.29 2 15.67 2 12.75zM7 10.5h10a1 1 0 100-2H7a1 1 0 100 2zm0 4h6a1 1 0 100-2H7a1 1 0 100 2z"/>
       </svg>
     </button>
 
@@ -496,11 +548,25 @@
       aria-label="Download summary"
       title="Download summary"
     >
-      <!-- Download icon -->
-      <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16" />
-      </svg>
+      {#if downloading}
+        <!-- Spinner -->
+        <svg class="w-6 h-6 text-white animate-spin" viewBox="0 0 24 24" fill="none">
+          <circle class="opacity-30" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+          <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+        </svg>
+      {:else}
+        <!-- High-quality download icon -->
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-white transition-transform duration-150 hover:scale-110" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 3a1 1 0 011 1v8.586l2.293-2.293a1 1 0 111.414 1.414l-4.004 4.004a1 1 0 01-1.414 0l-4.004-4.004a1 1 0 111.414-1.414L11 12.586V4a1 1 0 011-1z"/>
+          <path d="M4 18a2 2 0 012-2h12a2 2 0 012 2v1a2 2 0 01-2 2H6a2 2 0 01-2-2v-1z"/>
+        </svg>
+      {/if}
     </button>
+    {#if downloading}
+      <div class="absolute bottom-20 right-5 text-sm text-gray-200 bg-gray-800/80 px-3 py-1 rounded-md border border-gray-700 shadow">
+        Downloading...
+      </div>
+    {/if}
   </div>
 
   <!-- Slide-in History Panel -->

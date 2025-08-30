@@ -82,6 +82,10 @@ class ConversationResponse(BaseModel):
 class SummaryRequest(BaseModel):
     history: list
 
+# Simple TTS request for playing arbitrary text (e.g., initial greeting)
+class TTSRequest(BaseModel):
+    text: str
+
 # --- API Endpoint ---
 @app.post("/api/conversation", response_model=ConversationResponse)
 async def handle_conversation(request: ConversationRequest):
@@ -253,6 +257,29 @@ async def generate_summary(request: SummaryRequest):
     except Exception as e:
         print(f"An unexpected error occurred (summary): {e}")
         raise HTTPException(status_code=500, detail="An internal server error occurred (summary).")
+
+# --- Text-to-Speech API Endpoint (for initial greeting etc.) ---
+@app.post("/api/tts")
+async def tts(request: TTSRequest):
+    try:
+        text = request.text.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Text is required.")
+        voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+        audio_stream = elevenlabs_client.text_to_speech.stream(
+            text=text,
+            voice_id=voice_id,
+        )
+        file_name = f"{uuid.uuid4()}.mp3"
+        file_path = f"server/static/audio/{file_name}"
+        with open(file_path, "wb") as f:
+            for chunk in audio_stream:
+                f.write(chunk)
+        audio_url = f"/static/audio/{file_name}"
+        return {"audio_url": audio_url}
+    except Exception as e:
+        print(f"TTS error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to synthesize speech.")
 
 if __name__ == "__main__":
     import uvicorn
