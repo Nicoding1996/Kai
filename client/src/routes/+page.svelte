@@ -10,6 +10,30 @@
   let inFlight = false;
   let audioEl = null;
 
+  // Web Audio API for audio-reactive orb
+  let audioCtx;
+  let analyser;
+  let sourceNode;
+  let dataArray;
+  let rafId = 0;
+  let speaking = false;
+  let orbLevel = 0; // 0..1 intensity for glow/scale
+
+  // Ensure AudioContext exists and is resumed (must be called from a user gesture)
+  async function ensureAudioCtx() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
+    } catch (e) {
+      console.warn('AudioContext resume failed', e);
+    }
+  }
+
   // UI state for new design
   let isHistoryOpen = false;
 
@@ -18,7 +42,7 @@
   let previousSubtitle = '';
 
   // Auto-stop configuration
-  const SILENCE_TIMEOUT_MS = 8000; // stop after 8s of silence
+  const SILENCE_TIMEOUT_MS = 6500; // stop after 6.5s of silence
   const MAX_LISTEN_MS = 30000;     // hard cap: 30s per turn
 
   let silenceTimer = null;
@@ -70,6 +94,37 @@
 
   // Resolver used to await recognition.onend when stopping recognition
   let recognitionEndResolver = null;
+
+  // Speaking visualizer helpers
+  function stopSpeakingViz() {
+    speaking = false;
+    orbLevel = 0;
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+    try {
+      if (analyser) analyser.disconnect();
+      if (sourceNode) sourceNode.disconnect();
+    } catch (e) {
+      // no-op
+    }
+    analyser = null;
+    sourceNode = null;
+    dataArray = null;
+  }
+
+  function speakingAnimationLoop() {
+    if (!speaking || !analyser || !dataArray) return;
+    analyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+    const avg = sum / (dataArray.length || 1);
+    // Map average energy ~[0..255] into 0..1, soft-thresholded
+    const level = Math.min(1, Math.max(0, (avg - 20) / 160));
+    orbLevel = level;
+    rafId = requestAnimationFrame(speakingAnimationLoop);
+  }
 
   if (typeof window !== 'undefined') {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -137,6 +192,8 @@
       interimTranscript = '';
       isListening = true;
       status = 'Tap to Stop';
+      // Prime/resume AudioContext under a click user-gesture to satisfy autoplay policies
+      ensureAudioCtx();
       recognition.start();
     } else {
       // Stop and process captured speech
@@ -222,6 +279,38 @@
           audioEl.currentTime = 0;
         }
         audioEl = new Audio(`http://localhost:8000${data.audio_url}`);
+        audioEl.crossOrigin = 'anonymous';
+        audioEl.muted = false;
+        audioEl.volume = 1;
+
+        // Initialize Web Audio graph and speaking animation
+        await ensureAudioCtx();
+        if (sourceNode) {
+          try { sourceNode.disconnect(); } catch {}
+        }
+        sourceNode = audioCtx.createMediaElementSource(audioEl);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+        // Route audio through analyser to destination
+        sourceNode.connect(analyser);
+        analyser.connect(audioCtx.destination);
+
+        audioEl.onplay = async () => {
+          try {
+            if (audioCtx.state === 'suspended') await audioCtx.resume();
+          } catch {}
+          speaking = true;
+          speakingAnimationLoop();
+        };
+        audioEl.onerror = (e) => {
+          console.error('Audio element error', e, audioEl.error);
+          stopSpeakingViz();
+        };
+        const stop = () => { stopSpeakingViz(); };
+        audioEl.onpause = stop;
+        audioEl.onended = stop;
+
         await audioEl.play();
       } catch (e) {
         console.error('Error playing audio', e);
@@ -285,12 +374,13 @@
   <main class="flex-1 flex flex-col items-center justify-center relative">
     <!-- Orb -->
     <div
-      class="relative rounded-full w-56 h-56 md:w-72 md:h-72 lg:w-80 lg:h-80 cursor-pointer select-none transition-transform duration-300 ease-in-out shadow-[0_0_60px_rgba(139,92,246,0.35)] bg-gradient-to-br from-purple-600 via-purple-700 to-indigo-700 breathing"
-      class:breathing-active={isListening}
+      class="orb relative rounded-full w-56 h-56 md:w-72 md:h-72 lg:w-80 lg:h-80 cursor-pointer select-none transition-transform duration-300 ease-in-out bg-gradient-to-br from-purple-600 via-purple-700 to-indigo-700 breathing"
+      class:breathing-active={isListening || speaking}
       on:click={handleOrbClick}
       role="button"
       aria-label="Tap to start or stop listening"
       tabindex="0"
+      style={`--orb-scale:${(1 + orbLevel * 0.06).toFixed(3)}; --orb-glow:${Math.round(orbLevel * 60)}px;`}
     >
       <!-- Inner label -->
       <div class="absolute inset-0 rounded-full flex items-center justify-center text-white font-semibold">
@@ -413,6 +503,15 @@
   @keyframes fadeOutDown {
     from { opacity: 1; transform: translateY(0); }
     to   { opacity: 0; transform: translateY(8px); }
+  }
+
+  /* Audio-reactive orb styling driven by CSS vars */
+  .orb {
+    transform: scale(var(--orb-scale, 1));
+    box-shadow:
+      0 0 calc(30px + var(--orb-glow, 0px)) rgba(139, 92, 246, 0.45),
+      0 0 calc(12px + (var(--orb-glow, 0px) / 2)) rgba(99, 102, 241, 0.30);
+    transition: transform 80ms linear, box-shadow 80ms linear;
   }
 
   /* History item fade */
