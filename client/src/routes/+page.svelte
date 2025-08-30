@@ -30,6 +30,12 @@
   // Highlight download button when conversation concluded
   let conversationEnded = false;
 
+  // Small menu to choose Markdown or PDF download
+  let showDownloadMenu = false;
+
+  // One-time hint bubble when conversation ends
+  let showDownloadHint = false;
+
   // Microphone visualisation (react while the user is speaking)
   let micActive = false;
   let micStream;
@@ -340,6 +346,8 @@
       const endRegex = /(fantastic plan|great work(?: today)?|you['’]ve done great|you have done great|you did great|best of luck|i['’]m here whenever|im here whenever|wonderful!?\s|you've done great work)/i;
       if (endRegex.test(lc)) {
         conversationEnded = true;
+        showDownloadHint = true;
+        setTimeout(() => (showDownloadHint = false), 4500);
       }
       const last = conversationHistory[conversationHistory.length - 1];
       if (!last || last.role !== 'model' || last.text !== data.text) {
@@ -420,7 +428,7 @@
     await audioEl.play();
   }
 
-  // Download session summary as a text file (with feedback)
+  // Download session summary as a Markdown file (with feedback)
   async function handleDownload() {
     try {
       if (!conversationHistory || conversationHistory.length === 0) return;
@@ -439,7 +447,7 @@
       const data = await response.json();
       const text = data.summary_text ?? 'No summary returned.';
 
-      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement('a');
@@ -453,6 +461,46 @@
       console.error('Failed to download summary', e);
     } finally {
       // brief feedback window
+      setTimeout(() => (downloading = false), 600);
+    }
+  }
+
+  // Download session summary as a PDF file (server-rendered)
+  async function handleDownloadPdf() {
+    try {
+      if (!conversationHistory || conversationHistory.length === 0) return;
+      downloading = true;
+
+      const response = await fetch('http://localhost:8000/api/summary_pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ history: conversationHistory })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Network response was not ok: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const pdfUrl = data.pdf_url;
+      if (!pdfUrl) throw new Error('No pdf_url returned from server');
+
+      // Fetch the PDF as a blob so we can force a download (cross-origin safe)
+      const pdfRes = await fetch(`http://localhost:8000${pdfUrl}`);
+      if (!pdfRes.ok) throw new Error('Failed to fetch generated PDF');
+      const blob = await pdfRes.blob();
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'kai-session-summary.pdf';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Failed to download PDF summary', e);
+    } finally {
       setTimeout(() => (downloading = false), 600);
     }
   }
@@ -504,9 +552,9 @@
 <!-- Minimalist, immersive layout -->
 <div class="min-h-screen bg-gray-900 text-white font-sans flex flex-col overflow-hidden">
   <!-- Title -->
-  <header class="py-6 text-center">
+  <header class="py-4 text-center">
     <h1
-      class="text-5xl md:text-6xl font-bold tracking-tight bg-gradient-to-r from-purple-200 via-white to-indigo-200 text-transparent bg-clip-text"
+      class="title-clean text-3xl md:text-4xl font-semibold tracking-tight"
       style="font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial;"
     >
       Kai - Your AI Coach
@@ -563,9 +611,9 @@
 
     <!-- Download Summary -->
     <button
-      class="w-11 h-11 rounded-full bg-purple-700 hover:bg-purple-600 transition-colors flex items-center justify-center shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+      class="w-11 h-11 rounded-full bg-purple-700 hover:bg-purple-600 transition-colors flex items-center justify-center shadow-md disabled:opacity-50 disabled:cursor-not-allowed relative"
       class:animate-pulse={conversationEnded}
-      on:click={handleDownload}
+      on:click={() => (showDownloadMenu = !showDownloadMenu)}
       disabled={conversationHistory.length === 0}
       aria-label="Download summary"
       title="Download summary"
@@ -584,6 +632,25 @@
         </svg>
       {/if}
     </button>
+
+    <!-- Small download menu -->
+    {#if showDownloadMenu}
+      <div class="absolute bottom-20 right-5 bg-gray-900/95 border border-gray-700 rounded-md shadow-lg p-2 w-44 backdrop-blur-md">
+        <button
+          class="w-full text-left px-2 py-1.5 rounded hover:bg-gray-800 text-gray-200 text-sm"
+          on:click={() => { showDownloadMenu = false; handleDownload(); }}
+        >
+          Download as Markdown (.md)
+        </button>
+        <button
+          class="w-full text-left mt-1 px-2 py-1.5 rounded hover:bg-gray-800 text-gray-200 text-sm"
+          on:click={() => { showDownloadMenu = false; handleDownloadPdf(); }}
+        >
+          Download as PDF (.pdf)
+        </button>
+      </div>
+    {/if}
+
     {#if downloading}
       <div class="absolute bottom-20 right-5 text-sm text-gray-200 bg-gray-800/80 px-3 py-1 rounded-md border border-gray-700 shadow">
         Downloading...
@@ -670,6 +737,12 @@
       0 0 calc(30px + var(--orb-glow, 0px)) rgba(139, 92, 246, 0.45),
       0 0 calc(12px + (var(--orb-glow, 0px) / 2)) rgba(99, 102, 241, 0.30);
     transition: transform 80ms linear, box-shadow 80ms linear;
+  }
+
+  /* Subtle professional title treatment */
+  .title-clean {
+    color: #e9e9f3;
+    text-shadow: 0 1px 0 rgba(0,0,0,0.25), 0 2px 12px rgba(88, 28, 135, 0.15);
   }
 
   /* History item fade */

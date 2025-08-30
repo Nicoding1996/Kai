@@ -8,6 +8,12 @@ from elevenlabs.client import ElevenLabs
 import uuid
 from fastapi.middleware.cors import CORSMiddleware
 
+# PDF generation (simple Markdown-ish rendering)
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+
 # Load environment variables
 load_dotenv()
 
@@ -67,6 +73,7 @@ elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
 # --- Static File Serving ---
 os.makedirs("server/static/audio", exist_ok=True)
+os.makedirs("server/static/docs", exist_ok=True)
 app.mount("/static", StaticFiles(directory="server/static"), name="static")
 
 # --- Pydantic Models ---
@@ -258,6 +265,115 @@ async def generate_summary(request: SummaryRequest):
     except Exception as e:
         print(f"An unexpected error occurred (summary): {e}")
         raise HTTPException(status_code=500, detail="An internal server error occurred (summary).")
+
+# --- Summary PDF API Endpoint ---
+@app.post("/api/summary_pdf")
+async def generate_summary_pdf(request: SummaryRequest):
+    """
+    Generate a Markdown-formatted summary (like /api/summary) and deliver it as a PDF file.
+    """
+    try:
+        # 1) First, reuse the summarization call to get Markdown text
+        api_key = os.getenv("REQUESTY_API_KEY")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        system_prompt = (
+            "You are a highly skilled analyst. Your task is to provide a concise, well-structured summary of the following coaching conversation. "
+            "**Format the entire summary using Markdown.** Use headings for 'Key Goals', 'Major Breakthroughs', and 'Actionable Next Steps', "
+            "and use bullet points for the items in each section."
+        )
+
+        messages = [{"role": "system", "content": system_prompt}]
+        for msg in request.history:
+            if isinstance(msg, dict) and "role" in msg and "text" in msg:
+                role = msg["role"]
+                if role in ("model", "bot", "ai"):
+                    role = "assistant"
+                if role in ("user", "assistant"):
+                    content = str(msg["text"]).strip()
+                    if content:
+                        messages.append({"role": role, "content": content})
+
+        payload = {
+            "model": "google/gemini-1.5-flash-latest",
+            "messages": messages
+        }
+
+        response = requests.post(
+            "https://router.requesty.ai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        response.raise_for_status()
+        resp_json = response.json()
+        summary_md = extract_message_text(resp_json)
+        if not summary_md:
+            summary_md = "Summary could not be extracted from the provider response."
+
+        # 2) Convert basic Markdown to a simple PDF
+        file_name = f"{uuid.uuid4()}.pdf"
+        file_path = f"server/static/docs/{file_name}"
+
+        styles = getSampleStyleSheet()
+        doc = SimpleDocTemplate(file_path, pagesize=letter, title="Kai Session Summary")
+        flow = []
+
+        def add_paragraph(text, style=styles["BodyText"], space=6):
+            flow.append(Paragraph(text, style))
+            flow.append(Spacer(1, space))
+
+        bullets = []
+        for raw_line in summary_md.splitlines():
+            line = raw_line.rstrip()
+            if not line.strip():
+                # flush any pending bullets
+                if bullets:
+                    flow.append(ListFlowable([ListItem(Paragraph(x, styles["BodyText"])) for x in bullets], bulletType="bullet"))
+                    flow.append(Spacer(1, 6))
+                    bullets.clear()
+                flow.append(Spacer(1, 6))
+                continue
+
+            if line.startswith("# "):
+                # flush bullets
+                if bullets:
+                    flow.append(ListFlowable([ListItem(Paragraph(x, styles["BodyText"])) for x in bullets], bulletType="bullet"))
+                    flow.append(Spacer(1, 6))
+                    bullets.clear()
+                add_paragraph(f"<b>{line[2:].strip()}</b>", styles["Heading1"], space=10)
+            elif line.startswith("## "):
+                if bullets:
+                    flow.append(ListFlowable([ListItem(Paragraph(x, styles["BodyText"])) for x in bullets], bulletType="bullet"))
+                    flow.append(Spacer(1, 6))
+                    bullets.clear()
+                add_paragraph(f"<b>{line[3:].strip()}</b>", styles["Heading2"], space=8)
+            elif line.lstrip().startswith(("- ", "* ")):
+                bullets.append(line.lstrip()[2:].strip())
+            else:
+                # normal paragraph
+                if bullets:
+                    flow.append(ListFlowable([ListItem(Paragraph(x, styles["BodyText"])) for x in bullets], bulletType="bullet"))
+                    flow.append(Spacer(1, 6))
+                    bullets.clear()
+                add_paragraph(line, styles["BodyText"], space=6)
+
+        if bullets:
+            flow.append(ListFlowable([ListItem(Paragraph(x, styles["BodyText"])) for x in bullets], bulletType="bullet"))
+            flow.append(Spacer(1, 6))
+            bullets.clear()
+
+        doc.build(flow)
+
+        pdf_url = f"/static/docs/{file_name}"
+        return {"pdf_url": pdf_url}
+
+    except Exception as e:
+        print(f"PDF summary error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate PDF summary.")
 
 # --- Text-to-Speech API Endpoint (for initial greeting etc.) ---
 @app.post("/api/tts")
