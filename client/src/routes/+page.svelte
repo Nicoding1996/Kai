@@ -159,6 +159,39 @@
       inFlight = false;
     }
   }
+
+  // Download session summary as a text file
+  async function handleDownload() {
+    try {
+      if (!conversationHistory || conversationHistory.length === 0) return;
+
+      const response = await fetch('http://localhost:8000/api/summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ history: conversationHistory })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Network response was not ok: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const text = data.summary_text ?? 'No summary returned.';
+
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'kai-session-summary.txt';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Failed to download summary', e);
+    }
+  }
 </script>
 
 <div class="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white font-sans">
@@ -198,6 +231,17 @@
       {status}
     </div>
   </div>
+
+  <!-- Download Summary Button -->
+  <button
+    class="mt-6 px-4 py-2 rounded-md bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+    on:click={handleDownload}
+    disabled={conversationHistory.length === 0}
+    aria-label="Download session summary"
+    title="Download session summary"
+  >
+    Download Summary
+  </button>
 </div>
 
 <style>

@@ -41,6 +41,10 @@ class ConversationResponse(BaseModel):
     text: str
     audio_url: str
 
+# New model for summary requests
+class SummaryRequest(BaseModel):
+    history: list
+
 # --- API Endpoint ---
 @app.post("/api/conversation", response_model=ConversationResponse)
 async def handle_conversation(request: ConversationRequest):
@@ -56,16 +60,18 @@ async def handle_conversation(request: ConversationRequest):
                 "role": "system",
                 "content": (
                     "You are Kai, an expert AI NLP coach. Your personality is warm, patient, and deeply curious. Your purpose is to be a \"Mindful Mirror,\" helping users find their own solutions by asking insightful, open-ended questions. NEVER give direct advice.\n\n"
-                    "Your Conversational Style:\n"
-                    "*   Use Human-like Fillers: Start your responses with natural, gentle interjections to create a more thoughtful pace. Use words like \"Hmm...\", \"That's a great question...\", \"I see...\", \"Okay...\", or \"That makes sense...\"\n"
-                    "*   Show Empathy: Acknowledge the user's feelings. Use phrases like \"It sounds like that was a challenging experience,\" or \"I can hear how important that is to you.\"\n"
-                    "*   Keep it Concise: Your responses should be short and focused, usually one or two sentences, and should always end with a question.\n\n"
-                    "Your Coaching Framework (The GROW Model):\n"
-                    "1.  Goal: Start by helping the user define a clear, positive goal. Ask questions like, \"What would you like to achieve?\" or \"What does the ideal outcome look like for you?\"\n"
-                    "2.  Reality: Once a goal is set, help them explore their current situation. Ask questions like, \"What's happening now?\", \"What steps have you taken so far?\", and \"What's holding you back?\"\n"
-                    "3.  Options: After exploring the reality, guide them to brainstorm possibilities. Ask questions like, \"What are all the possible things you could do?\", \"What if you had no limitations?\", and \"What's the most energizing option for you?\"\n"
-                    "4.  Will (or Way Forward): Once they have options, help them commit to action. Ask questions like, \"What will you do now?\", \"What is your first small step?\", and \"How will you commit to that?\"\n\n"
-                    "Keep your responses concise, empathetic, and always end with a question to move the conversation forward."
+                    "**--- CRITICAL RULE: THE FIRST TURN ---**\n"
+                    "**If this is the very first message from the user in the conversation, your ONLY goal is to greet them warmly and ask what's on their mind. Respond naturally to a greeting. For example, if the user says \"Hello,\" you should say something like, \"Hello! It's good to hear from you. What's on your mind today?\" Do NOT start with \"Hmm...\" or jump into coaching on the first turn.**\n"
+                    "**--- END OF CRITICAL RULE ---**\n\n"
+                    "**Your Conversational Style (After the first turn):**\n"
+                    "*   **Use a Natural, Thoughtful Cadence:** Occasionally begin your responses with gentle, reflective phrases like 'That's a great question...', or 'I see...' to create a more human-like pace. Avoid starting with \"Hmm...\" if it feels unnatural.\n"
+                    "*   **Show Empathy:** Acknowledge the user's feelings. Use phrases like \"It sounds like that was a challenging experience,\" or \"I can hear how important that is to you.\"\n"
+                    "*   **Keep it Concise:** Your responses should be short and focused, usually one or two sentences, and should always end with a question (unless you are concluding the session).\n\n"
+                    "**Your Coaching Framework (The GROW Model):**\n"
+                    "1.  **Goal:** Start by helping the user define a clear, positive goal. Ask questions like, \"What would you like to achieve?\" or \"What does the ideal outcome look like for you?\"\n"
+                    "2.  **Reality:** Once a goal is set, help them explore their current situation. Ask questions like, \"What's happening now?\", \"What steps have you taken so far?\", and \"What's holding you back?\"\n"
+                    "3.  **Options:** After exploring the reality, guide them to brainstorm possibilities. Ask questions like, \"What are all the possible things you could do?\", \"What if you had no limitations?\", and \"What's the most energizing option for you?\"\n"
+                    "4.  **Will (or Way Forward & Conclude):** Once they have options, help them commit to a clear action. Ask questions like, \"What will you do now?\", \"What is your first small step?\", and \"How will you commit to that?\". **Once the user has clearly stated a specific, actionable step they will take, your final task is to affirm their decision and end the conversation.** Your concluding response should be something like: \"That sounds like a fantastic plan. Committing to that first step is the most important part. I'm here whenever you're ready to reflect on your progress. You've done great work today.\"\n"
                 )
             }
         ]
@@ -126,6 +132,67 @@ async def handle_conversation(request: ConversationRequest):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail="An internal server error occurred.")
+
+# --- Summary API Endpoint ---
+@app.post("/api/summary")
+async def generate_summary(request: SummaryRequest):
+    """
+    Generate a concise structured session summary:
+    Sections: Key Goals, Major Breakthroughs, Actionable Next Steps.
+    """
+    try:
+        api_key = os.getenv("REQUESTY_API_KEY")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        system_prompt = (
+            "You are a highly skilled analyst. Your task is to provide a concise, structured summary of the following coaching conversation. "
+            "Organize the summary into three sections: 'Key Goals', 'Major Breakthroughs', and 'Actionable Next Steps'."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt}
+        ]
+
+        # Normalize conversation roles from the UI to OpenAI-compatible roles
+        for msg in request.history:
+            if isinstance(msg, dict) and "role" in msg and "text" in msg:
+                role = msg["role"]
+                if role in ("model", "bot", "ai"):
+                    role = "assistant"
+                if role in ("user", "assistant"):
+                    content = str(msg["text"]).strip()
+                    if content:
+                        messages.append({"role": role, "content": content})
+
+        payload = {
+            "model": "google/gemini-1.5-flash-latest",
+            "messages": messages
+        }
+
+        response = requests.post(
+            "https://router.requesty.ai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        response.raise_for_status()
+        summary_text = response.json()["choices"][0]["message"]["content"]
+
+        return {"summary_text": summary_text}
+
+    except requests.exceptions.HTTPError as http_err:
+        print(f"HTTP error occurred (summary): {http_err}")
+        try:
+            print(f"Response content: {http_err.response.content.decode()}")
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail="Upstream AI service error (summary).")
+    except Exception as e:
+        print(f"An unexpected error occurred (summary): {e}")
+        raise HTTPException(status_code=500, detail="An internal server error occurred (summary).")
 
 if __name__ == "__main__":
     import uvicorn
