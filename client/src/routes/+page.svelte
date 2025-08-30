@@ -3,7 +3,7 @@
   let interimTranscript = '';
   let finalTranscript = '';
   let isListening = false;
-  let status = 'Hold to Speak';
+  let status = 'Tap to Start';
   let conversationHistory = [];
 
   // Prevent duplicate submits and duplicate audio
@@ -16,6 +16,46 @@
   // Floating subtitles: track just the latest line
   let currentSubtitle = '';
   let previousSubtitle = '';
+
+  // Auto-stop configuration
+  const SILENCE_TIMEOUT_MS = 8000; // stop after 8s of silence
+  const MAX_LISTEN_MS = 30000;     // hard cap: 30s per turn
+
+  let silenceTimer = null;
+  let maxListenTimer = null;
+
+  function clearTimers() {
+    if (silenceTimer) {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+    if (maxListenTimer) {
+      clearTimeout(maxListenTimer);
+      maxListenTimer = null;
+    }
+  }
+
+  function armSilenceTimer() {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+      if (isListening && !inFlight) {
+        // Trigger stop+process on prolonged silence
+        isListening = false;
+        handleOrbRelease();
+      }
+    }, SILENCE_TIMEOUT_MS);
+  }
+
+  function armMaxListenTimer() {
+    if (maxListenTimer) clearTimeout(maxListenTimer);
+    maxListenTimer = setTimeout(() => {
+      if (isListening && !inFlight) {
+        // Auto-stop after max duration
+        isListening = false;
+        handleOrbRelease();
+      }
+    }, MAX_LISTEN_MS);
+  }
 
   function setSubtitleFromHistory() {
     const last = conversationHistory[conversationHistory.length - 1];
@@ -48,11 +88,17 @@
         }
       }
       interimTranscript = tempInterim;
+
+      // Any incoming audio resets the silence timer
+      armSilenceTimer();
     };
 
     recognition.onstart = () => {
       isListening = true;
-      status = 'Listening...';
+      status = 'Tap to Stop';
+      // Arm timers when listening begins
+      armSilenceTimer();
+      armMaxListenTimer();
     };
 
     recognition.onend = () => {
@@ -66,31 +112,46 @@
         console.error('Recognition end resolver error', e);
       }
 
+      // Clear any auto-stop timers
+      clearTimers();
+
       isListening = false;
-      if (status === 'Listening...') {
-        status = 'Hold to Speak';
+      if (status === 'Tap to Stop') {
+        status = 'Tap to Start';
       }
     };
 
     recognition.onerror = (event) => {
       console.error('Speech recognition error', event.error);
       isListening = false;
-      status = 'Hold to Speak';
+      status = 'Tap to Start';
     };
   }
 
-  function handleOrbPress() {
-    // If already listening or a request is being processed, ignore
-    if (isListening || inFlight) return;
-    finalTranscript = '';
-    interimTranscript = '';
-    recognition.start();
+  // Tap-to-toggle handler
+  function handleOrbClick() {
+    if (inFlight) return;
+    if (!isListening) {
+      // Start listening
+      finalTranscript = '';
+      interimTranscript = '';
+      isListening = true;
+      status = 'Tap to Stop';
+      recognition.start();
+    } else {
+      // Stop and process captured speech
+      isListening = false;
+      handleOrbRelease();
+    }
   }
 
   async function handleOrbRelease() {
     // Prevent duplicate in-flight requests (allows processing even if recognition.onend already fired)
     if (inFlight) return;
     inFlight = true;
+
+    // Stop timers while we finalize this turn
+    clearTimers();
 
     recognition.stop();
     status = 'Thinking...';
@@ -124,7 +185,7 @@
     const capturedTranscript = finalTranscript.trim();
     if (!capturedTranscript) {
       console.log('No speech detected.');
-      status = 'Hold to Speak';
+      status = 'Tap to Start';
       inFlight = false;
       return;
     }
@@ -171,7 +232,7 @@
       conversationHistory = [...conversationHistory, { role: 'system', text: 'Sorry, I encountered an error.' }];
       setSubtitleFromHistory();
     } finally {
-      status = 'Hold to Speak';
+      status = 'Tap to Start';
       // Clear transcripts only after we've recorded them into history
       finalTranscript = '';
       interimTranscript = '';
@@ -226,11 +287,9 @@
     <div
       class="relative rounded-full w-56 h-56 md:w-72 md:h-72 lg:w-80 lg:h-80 cursor-pointer select-none transition-transform duration-300 ease-in-out shadow-[0_0_60px_rgba(139,92,246,0.35)] bg-gradient-to-br from-purple-600 via-purple-700 to-indigo-700 breathing"
       class:breathing-active={isListening}
-      on:mousedown={handleOrbPress}
-      on:mouseup={handleOrbRelease}
-      on:mouseleave={handleOrbRelease}
+      on:click={handleOrbClick}
       role="button"
-      aria-label="Hold to speak"
+      aria-label="Tap to start or stop listening"
       tabindex="0"
     >
       <!-- Inner label -->

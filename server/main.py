@@ -13,6 +13,43 @@ load_dotenv()
 
 app = FastAPI()
 
+# --- Helper to extract text from OpenAI-compatible responses ---
+def extract_message_text(resp_json):
+    """
+    Be resilient to provider variations:
+    - message.content: string
+    - message.content: [ {type:'text', text:'...'}, ... ]
+    - message.text: string
+    Returns empty string if nothing sensible found.
+    """
+    try:
+        choices = resp_json.get("choices") or []
+        if not choices:
+            return ""
+        msg = choices[0].get("message") or {}
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for c in content:
+                if isinstance(c, dict):
+                    if "text" in c and isinstance(c["text"], str):
+                        parts.append(c["text"])
+                    elif c.get("type") == "text" and isinstance(c.get("text"), str):
+                        parts.append(c["text"])
+                    elif isinstance(c.get("content"), str):
+                        parts.append(c["content"])
+                elif isinstance(c, str):
+                    parts.append(c)
+            return "\n".join(parts).strip()
+        # Some providers put plain text on 'text'
+        if isinstance(msg.get("text"), str):
+            return msg["text"].strip()
+    except Exception:
+        pass
+    return ""
+
 # --- CORS Configuration ---
 origins = [
     "http://localhost:5173",
@@ -59,19 +96,35 @@ async def handle_conversation(request: ConversationRequest):
             {
                 "role": "system",
                 "content": (
-                    "You are Kai, an expert AI NLP coach. Your personality is warm, patient, and deeply curious. Your purpose is to be a \"Mindful Mirror,\" helping users find their own solutions by asking insightful, open-ended questions. NEVER give direct advice.\n\n"
-                    "**--- CRITICAL RULE: THE FIRST TURN ---**\n"
-                    "**If this is the very first message from the user in the conversation, your ONLY goal is to greet them warmly and ask what's on their mind. Respond naturally to a greeting. For example, if the user says \"Hello,\" you should say something like, \"Hello! It's good to hear from you. What's on your mind today?\" Do NOT start with \"Hmm...\" or jump into coaching on the first turn.**\n"
-                    "**--- END OF CRITICAL RULE ---**\n\n"
-                    "**Your Conversational Style (After the first turn):**\n"
-                    "*   **Use a Natural, Thoughtful Cadence:** Occasionally begin your responses with gentle, reflective phrases like 'That's a great question...', or 'I see...' to create a more human-like pace. Avoid starting with \"Hmm...\" if it feels unnatural.\n"
-                    "*   **Show Empathy:** Acknowledge the user's feelings. Use phrases like \"It sounds like that was a challenging experience,\" or \"I can hear how important that is to you.\"\n"
-                    "*   **Keep it Concise:** Your responses should be short and focused, usually one or two sentences, and should always end with a question (unless you are concluding the session).\n\n"
-                    "**Your Coaching Framework (The GROW Model):**\n"
-                    "1.  **Goal:** Start by helping the user define a clear, positive goal. Ask questions like, \"What would you like to achieve?\" or \"What does the ideal outcome look like for you?\"\n"
-                    "2.  **Reality:** Once a goal is set, help them explore their current situation. Ask questions like, \"What's happening now?\", \"What steps have you taken so far?\", and \"What's holding you back?\"\n"
-                    "3.  **Options:** After exploring the reality, guide them to brainstorm possibilities. Ask questions like, \"What are all the possible things you could do?\", \"What if you had no limitations?\", and \"What's the most energizing option for you?\"\n"
-                    "4.  **Will (or Way Forward & Conclude):** Once they have options, help them commit to a clear action. Ask questions like, \"What will you do now?\", \"What is your first small step?\", and \"How will you commit to that?\". **Once the user has clearly stated a specific, actionable step they will take, your final task is to affirm their decision and end the conversation.** Your concluding response should be something like: \"That sounds like a fantastic plan. Committing to that first step is the most important part. I'm here whenever you're ready to reflect on your progress. You've done great work today.\"\n"
+                    """You are Kai, an expert AI NLP coach. Your personality is warm, patient, and deeply curious. Your purpose is to be a "Mindful Mirror," helping users find their own solutions by asking insightful, open-ended questions. NEVER give direct advice.
+
+--- CRITICAL RULE: THE FIRST TURN ---
+If this is the very first message from the user in the conversation, your ONLY goal is to greet them warmly and ask what's on their mind. Respond naturally to a greeting.
+--- END OF CRITICAL RULE ---
+
+Your Conversational Style (After the first turn):
+- Use a Natural, Thoughtful Cadence.
+- Show Empathy.
+- Keep it Concise and end with a question (unless concluding).
+
+Your Coaching Framework (GROW Model enhanced with Well-Formed Outcome):
+1. Goal: Help the user define a clear, positive goal.
+   Start with: "What would you like to achieve?"
+   Deepen with: "What will it look, sound, and feel like when you have that?"
+
+2. Reality: Help them explore their current situation.
+   Start with: "What's happening now regarding that goal?"
+   Deepen with: "What, if anything, is stopping you?" and "What resources (internal or external) do you already have to help you?"
+
+3. Options: Guide them to brainstorm possibilities.
+   Start with: "What are all the possible things you could do?"
+   Deepen with: "What would you do if you knew you couldn't fail?"
+
+4. Will & Conclude: Help them commit to action and define success.
+   Start with: "What is the very first small step you will take?"
+   Deepen with: "How will you know you've successfully achieved your goal? What will be the evidence?"
+   Conclusion Trigger: Once the user has clearly stated a specific action they will take, affirm their decision and end the conversation gracefully.
+"""
                 )
             }
         ]
@@ -106,7 +159,11 @@ async def handle_conversation(request: ConversationRequest):
         # --- END OF CRITICAL SECTION ---
 
         response.raise_for_status()
-        ai_text_response = response.json()["choices"][0]["message"]["content"]
+        resp_json = response.json()
+        ai_text_response = extract_message_text(resp_json)
+        if not ai_text_response:
+            # Provide a sane fallback so the client doesn't crash
+            ai_text_response = "I created your summary, but the response format was unexpected."
 
         voice_id = os.getenv("ELEVENLABS_VOICE_ID")
         audio_stream = elevenlabs_client.text_to_speech.stream(
@@ -179,7 +236,10 @@ async def generate_summary(request: SummaryRequest):
             timeout=60
         )
         response.raise_for_status()
-        summary_text = response.json()["choices"][0]["message"]["content"]
+        resp_json = response.json()
+        summary_text = extract_message_text(resp_json)
+        if not summary_text:
+            summary_text = "Summary could not be extracted from the provider response."
 
         return {"summary_text": summary_text}
 

@@ -29,3 +29,7 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# Ignore generated audio files, but keep the directory
+server/static/audio/*
+!.gitkeep
