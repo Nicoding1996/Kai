@@ -54,9 +54,17 @@ async def handle_conversation(request: ConversationRequest):
         messages = [
             {"role": "system", "content": "You are Kai, a helpful AI NLP coach. Your goal is to be a mindful mirror, guiding users to their own solutions through curious, non-judgmental questions. Keep your responses concise."}
         ]
-        for message in request.history:
-             if 'role' in message and 'text' in message:
-                messages.append({"role": message['role'], "content": message['text']})
+        # Include only recent user/assistant turns; exclude any UI 'system' rows
+        for message in request.history[-8:]:
+            if 'role' in message and 'text' in message:
+                role = message['role']
+                # Map UI roles to API roles
+                if role in ('model', 'bot', 'ai'):
+                    role = 'assistant'
+                if role in ('user', 'assistant'):
+                    content = str(message['text']).strip()
+                    if content:
+                        messages.append({"role": role, "content": content})
         
         messages.append({"role": "user", "content": request.text})
 
@@ -67,6 +75,8 @@ async def handle_conversation(request: ConversationRequest):
             "messages": messages
         }
         
+        # Debug: uncomment to inspect payload shape if needed
+        # print("Payload being sent to router:", payload)
         response = requests.post(
             "https://router.requesty.ai/v1/chat/completions",
             headers=headers,

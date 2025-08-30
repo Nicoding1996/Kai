@@ -6,6 +6,10 @@
   let status = 'Hold to Speak';
   let conversationHistory = [];
 
+  // Prevent duplicate submits and duplicate audio
+  let inFlight = false;
+  let audioEl = null;
+
   if (typeof window !== 'undefined') {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     recognition = new SpeechRecognition();
@@ -47,14 +51,18 @@
   }
 
   function handleOrbPress() {
-    if (isListening) return;
+    // If already listening or a request is being processed, ignore
+    if (isListening || inFlight) return;
     finalTranscript = '';
     interimTranscript = '';
     recognition.start();
   }
 
   async function handleOrbRelease() {
-    if (!isListening) return;
+    // Guard to prevent duplicate releases (mouseup + mouseleave, etc.)
+    if (!isListening || inFlight) return;
+    inFlight = true;
+
     recognition.stop();
     status = 'Thinking...';
 
@@ -64,6 +72,7 @@
       if (!capturedTranscript) {
         console.log("No speech detected.");
         status = 'Hold to Speak';
+        inFlight = false;
         return;
       }
 
@@ -82,11 +91,25 @@
         }
 
         const data = await response.json();
+
+        // Append model reply only if it's not already the last entry
         const aiMessage = { role: 'model', text: data.text };
-        conversationHistory = [...conversationHistory, aiMessage];
-        
-        const audio = new Audio(`http://localhost:8000${data.audio_url}`);
-        audio.play();
+        const last = conversationHistory[conversationHistory.length - 1];
+        if (!last || last.role !== 'model' || last.text !== data.text) {
+          conversationHistory = [...conversationHistory, aiMessage];
+        }
+
+        // Play audio once: stop any previous playback first
+        try {
+          if (audioEl) {
+            audioEl.pause();
+            audioEl.currentTime = 0;
+          }
+          audioEl = new Audio(`http://localhost:8000${data.audio_url}`);
+          await audioEl.play();
+        } catch (e) {
+          console.error('Error playing audio', e);
+        }
 
       } catch (error) {
         console.error('There was a problem with the fetch operation:', error);
@@ -96,6 +119,7 @@
         status = 'Hold to Speak';
         finalTranscript = '';
         interimTranscript = '';
+        inFlight = false;
       }
     }, 250);
   }
