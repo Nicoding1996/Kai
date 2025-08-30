@@ -12,12 +12,19 @@
 
   // Web Audio API for audio-reactive orb
   let audioCtx;
-  let analyser;
-  let sourceNode;
-  let dataArray;
+  let analyser;     // AI playback analyser
+  let sourceNode;   // AI playback source
+  let dataArray;    // AI spectrum buffer
   let rafId = 0;
-  let speaking = false;
+  let speaking = false; // AI is speaking
   let orbLevel = 0; // 0..1 intensity for glow/scale
+
+  // Microphone visualisation (react while the user is speaking)
+  let micActive = false;
+  let micStream;
+  let micSource;
+  let micAnalyser;
+  let micDataArray;
 
   // Ensure AudioContext exists and is resumed (must be called from a user gesture)
   async function ensureAudioCtx() {
@@ -32,6 +39,38 @@
     } catch (e) {
       console.warn('AudioContext resume failed', e);
     }
+  }
+
+  async function startMicViz() {
+    try {
+      await ensureAudioCtx();
+      // Ask for mic access only when we need it
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micSource = audioCtx.createMediaStreamSource(micStream);
+      micAnalyser = audioCtx.createAnalyser();
+      micAnalyser.fftSize = 1024;
+      micDataArray = new Uint8Array(micAnalyser.fftSize);
+      micSource.connect(micAnalyser);
+      micActive = true;
+      if (!rafId) rafId = requestAnimationFrame(speakingAnimationLoop);
+    } catch (e) {
+      console.warn('Microphone visualizer unavailable:', e);
+      micActive = false;
+    }
+  }
+
+  function stopMicViz() {
+    micActive = false;
+    try {
+      if (micSource) micSource.disconnect();
+      if (micAnalyser) micAnalyser.disconnect();
+      if (micStream) micStream.getTracks().forEach(t => t.stop());
+    } catch {}
+    micSource = null;
+    micAnalyser = null;
+    micDataArray = null;
+    micStream = null;
+    // Don't cancel RAF here; the loop stops itself when both micActive and speaking are false
   }
 
   // UI state for new design
@@ -98,32 +137,63 @@
   // Speaking visualizer helpers
   function stopSpeakingViz() {
     speaking = false;
-    orbLevel = 0;
-    if (rafId) {
-      cancelAnimationFrame(rafId);
-      rafId = 0;
-    }
     try {
       if (analyser) analyser.disconnect();
       if (sourceNode) sourceNode.disconnect();
-    } catch (e) {
-      // no-op
-    }
+    } catch {}
     analyser = null;
     sourceNode = null;
     dataArray = null;
+
+    // Only stop the loop if mic is not active either
+    if (!micActive && rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+      orbLevel = 0;
+    }
   }
 
   function speakingAnimationLoop() {
-    if (!speaking || !analyser || !dataArray) return;
-    analyser.getByteFrequencyData(dataArray);
-    let sum = 0;
-    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-    const avg = sum / (dataArray.length || 1);
-    // Map average energy ~[0..255] into 0..1, soft-thresholded
-    const level = Math.min(1, Math.max(0, (avg - 20) / 160));
-    orbLevel = level;
-    rafId = requestAnimationFrame(speakingAnimationLoop);
+    // Read AI playback energy
+    let aiLevel = 0;
+    if (speaking && analyser && dataArray) {
+      analyser.getByteFrequencyData(dataArray);
+      let sum = 0;
+      for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+      const avg = sum / (dataArray.length || 1);
+      // Slightly more sensitive mapping for stronger pulse
+      aiLevel = Math.min(1, Math.max(0, (avg - 10) / 100));
+    }
+
+    // Read microphone energy (RMS of time-domain)
+    let micLevel = 0;
+    if (micActive && micAnalyser) {
+      if (!micDataArray) micDataArray = new Uint8Array(micAnalyser.fftSize);
+      micAnalyser.getByteTimeDomainData(micDataArray);
+      let sumSq = 0;
+      for (let i = 0; i < micDataArray.length; i++) {
+        const v = (micDataArray[i] - 128) / 128;
+        sumSq += v * v;
+      }
+      const rms = Math.sqrt(sumSq / (micDataArray.length || 1));
+      // Map RMS (~0..~0.5) into 0..1 with a small floor
+      micLevel = Math.min(1, Math.max(0, (rms - 0.02) / 0.2));
+    }
+
+    // Combine signals; emphasize mic slightly to feel responsive while talking
+    const combined = Math.max(aiLevel, micLevel * 1.2);
+    orbLevel = combined;
+
+    if (speaking || micActive) {
+      rafId = requestAnimationFrame(speakingAnimationLoop);
+    } else {
+      // No sources active; stop loop
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+      orbLevel = 0;
+    }
   }
 
   if (typeof window !== 'undefined') {
