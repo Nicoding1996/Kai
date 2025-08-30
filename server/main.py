@@ -8,12 +8,15 @@ from elevenlabs.client import ElevenLabs
 import uuid
 from fastapi.middleware.cors import CORSMiddleware
 
+# Load environment variables
 load_dotenv()
 
 app = FastAPI()
 
-origins = ["http://localhost:5173"]
-
+# --- CORS Configuration ---
+origins = [
+    "http://localhost:5173",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -22,11 +25,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Client Initialization ---
 elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
+# --- Static File Serving ---
 os.makedirs("server/static/audio", exist_ok=True)
 app.mount("/static", StaticFiles(directory="server/static"), name="static")
 
+# --- Pydantic Models ---
 class ConversationRequest(BaseModel):
     text: str
     history: list
@@ -35,6 +41,7 @@ class ConversationResponse(BaseModel):
     text: str
     audio_url: str
 
+# --- API Endpoint ---
 @app.post("/api/conversation", response_model=ConversationResponse)
 async def handle_conversation(request: ConversationRequest):
     try:
@@ -44,28 +51,36 @@ async def handle_conversation(request: ConversationRequest):
             "Content-Type": "application/json",
         }
         
-        # Construct the messages payload from history
         messages = [
-            {"role": "system", "content": "You are Kai, a helpful and empathetic AI NLP coach..."}
+            {"role": "system", "content": "You are Kai, a helpful AI NLP coach. Your goal is to be a mindful mirror, guiding users to their own solutions through curious, non-judgmental questions. Keep your responses concise."}
         ]
         for message in request.history:
-            messages.append({"role": message['role'], "content": message['text']})
+             if 'role' in message and 'text' in message:
+                messages.append({"role": message['role'], "content": message['text']})
         
+        messages.append({"role": "user", "content": request.text})
+
+        # --- THIS IS THE ONLY PART THAT MATTERS ---
+        # We use the one correct URL and the one correct model name.
         payload = {
-            "model": "roquesty/gemini-2.5-pro",
+            "model": "google/gemini-1.5-flash-latest",
             "messages": messages
         }
         
-        # Corrected URL
-        response = requests.post("https://api.requesty.ai/v1/chat/completions", headers=headers, json=payload)
-        response.raise_for_status() # This will raise an error for 4xx or 5xx responses
+        response = requests.post(
+            "https://router.requesty.ai/v1/chat/completions",
+            headers=headers,
+            json=payload
+        )
+        # --- END OF CRITICAL SECTION ---
+
+        response.raise_for_status()
         ai_text_response = response.json()["choices"][0]["message"]["content"]
 
         voice_id = os.getenv("ELEVENLABS_VOICE_ID")
-        audio_stream = elevenlabs_client.generate(
+        audio_stream = elevenlabs_client.text_to_speech.stream(
             text=ai_text_response,
-            voice=voice_id,
-            model="eleven_multilingual_v2"
+            voice_id=voice_id,
         )
 
         file_name = f"{uuid.uuid4()}.mp3"
@@ -81,17 +96,12 @@ async def handle_conversation(request: ConversationRequest):
 
     except requests.exceptions.HTTPError as http_err:
         print(f"HTTP error occurred: {http_err}")
-        print(f"Response content: {http_err.response.content}")
-        raise HTTPException(status_code=http_err.response.status_code, detail="Error from AI service.")
+        print(f"Response content: {http_err.response.content.decode()}")
+        raise HTTPException(status_code=502, detail="Upstream AI service error.")
     except Exception as e:
-        print(f"An error occurred: {e}")
-        raise HTTPException(status_code=500, detail="An internal error occurred.")
-
-# (We are removing the summary endpoint for now to focus on the core functionality)
+        print(f"An unexpected error occurred: {e}")
+        raise HTTPException(status_code=500, detail="An internal server error occurred.")
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-# Final version for hackathon
