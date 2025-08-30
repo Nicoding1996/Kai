@@ -1,0 +1,159 @@
+<script>
+  let recognition;
+  let interimTranscript = '';
+  let finalTranscript = '';
+  let isListening = false;
+  let status = 'Hold to Speak';
+  let conversationHistory = [];
+
+  if (typeof window !== 'undefined') {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = (event) => {
+      let tempInterim = '';
+      finalTranscript = ''; // Reset final transcript on new result
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        } else {
+          tempInterim += event.results[i][0].transcript;
+        }
+      }
+      interimTranscript = tempInterim;
+    };
+
+    // --- ADD THESE NEW EVENT HANDLERS TO FIX THE BUG ---
+    recognition.onstart = () => {
+      isListening = true;
+      status = 'Listening...';
+    };
+
+    recognition.onend = () => {
+      isListening = false;
+      if (status === 'Listening...') {
+        status = 'Hold to Speak';
+      }
+    };
+
+    recognition.onerror = (event) => {
+      console.error('Speech recognition error', event.error);
+      isListening = false;
+      status = 'Hold to Speak';
+    };
+    // --- END OF NEW HANDLERS ---
+  }
+
+  function handleOrbPress() {
+    if (isListening) return;
+    finalTranscript = '';
+    interimTranscript = '';
+    recognition.start();
+  }
+
+  async function handleOrbRelease() {
+    if (!isListening) return;
+    recognition.stop();
+    status = 'Thinking...';
+
+    // A short delay to ensure the final transcript is captured
+    setTimeout(async () => {
+      const capturedTranscript = finalTranscript.trim();
+      if (!capturedTranscript) {
+        console.log("No speech detected.");
+        status = 'Hold to Speak';
+        return;
+      }
+
+      const userMessage = { role: 'user', text: capturedTranscript };
+      conversationHistory = [...conversationHistory, userMessage];
+
+      try {
+        const response = await fetch('http://localhost:8000/api/conversation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: capturedTranscript, history: conversationHistory }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Network response was not ok: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        const aiMessage = { role: 'model', text: data.text };
+        conversationHistory = [...conversationHistory, aiMessage];
+        
+        const audio = new Audio(`http://localhost:8000${data.audio_url}`);
+        audio.play();
+
+      } catch (error) {
+        console.error('There was a problem with the fetch operation:', error);
+        status = 'Error!';
+        conversationHistory = [...conversationHistory, { role: 'system', text: 'Sorry, I encountered an error.' }];
+      } finally {
+        status = 'Hold to Speak';
+        finalTranscript = '';
+        interimTranscript = '';
+      }
+    }, 250);
+  }
+</script>
+
+<div class="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white font-sans">
+  <h1 class="text-3xl md:text-4xl font-bold mb-6 text-center">Kai - Your AI NLP Coach</h1>
+
+  <!-- Chat History Box -->
+  <div class="w-full max-w-2xl h-96 flex flex-col-reverse overflow-y-auto p-4 bg-gray-800 rounded-lg mb-6 border border-gray-700">
+    <!-- This div is a spacer that pushes content up -->
+    <div>
+      {#each [...conversationHistory].reverse() as message}
+        <div class="mb-4 animate-fade-in">
+          <span class="font-bold capitalize" class:text-purple-400={message.role === 'model'} class:text-cyan-400={message.role === 'user'}>{message.role === 'model' ? 'Kai' : 'You'}:</span>
+          <span class="whitespace-pre-wrap">{message.text}</span>
+        </div>
+      {/each}
+    </div>
+  </div>
+
+  <!-- Live Transcript Area -->
+  <div class="w-full max-w-2xl h-12 text-center mb-6">
+    <p class="text-lg text-gray-400 italic">{interimTranscript || finalTranscript || '...'}</p>
+  </div>
+
+  <!-- Orb Button -->
+  <div
+    class="relative w-32 h-32 rounded-full flex items-center justify-center text-center cursor-pointer select-none transition-transform duration-200 ease-in-out"
+    class:scale-110={isListening}
+    on:mousedown={handleOrbPress}
+    on:mouseup={handleOrbRelease}
+    on:mouseleave={handleOrbRelease}
+    role="button"
+    tabindex="0"
+    aria-label="Hold to speak"
+  >
+    <div class="absolute inset-0 bg-purple-600 rounded-full animate-pulse-slow" class:animate-none={!isListening} />
+    <div class="relative text-white font-semibold">
+      {status}
+    </div>
+  </div>
+</div>
+
+<style>
+  .animate-fade-in {
+    animation: fadeIn 0.5s ease-in-out;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-pulse-slow {
+      animation: pulse-slow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes pulse-slow {
+      50% {
+          opacity: .7;
+      }
+  }
+</style>
