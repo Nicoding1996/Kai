@@ -27,6 +27,9 @@
   // Small UI feedback for downloads
   let downloading = false;
 
+  // Highlight download button when conversation concluded
+  let conversationEnded = false;
+
   // Microphone visualisation (react while the user is speaking)
   let micActive = false;
   let micStream;
@@ -255,6 +258,8 @@
       interimTranscript = '';
       isListening = true;
       status = 'Tap to Stop';
+      // Clear any previous end-of-conversation highlight when user starts a new turn
+      conversationEnded = false;
       // Prime/resume AudioContext under a click user-gesture to satisfy autoplay policies
       ensureAudioCtx();
       recognition.start();
@@ -329,6 +334,13 @@
 
       // Append model reply only if it's not already the last entry
       const aiMessage = { role: 'model', text: data.text };
+
+      // Detect conclusion phrases to highlight download button (case-insensitive)
+      const lc = (data.text || '').toLowerCase();
+      const endRegex = /(fantastic plan|great work(?: today)?|you['’]ve done great|you have done great|you did great|best of luck|i['’]m here whenever|im here whenever|wonderful!?\s|you've done great work)/i;
+      if (endRegex.test(lc)) {
+        conversationEnded = true;
+      }
       const last = conversationHistory[conversationHistory.length - 1];
       if (!last || last.role !== 'model' || last.text !== data.text) {
         conversationHistory = [...conversationHistory, aiMessage];
@@ -432,7 +444,7 @@
 
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'kai-session-summary.txt';
+      a.download = 'kai-session-summary.md';
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -483,11 +495,20 @@
   });
 </script>
 
+<svelte:head>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;700;800&display=swap" rel="stylesheet">
+</svelte:head>
+
 <!-- Minimalist, immersive layout -->
 <div class="min-h-screen bg-gray-900 text-white font-sans flex flex-col overflow-hidden">
   <!-- Title -->
   <header class="py-6 text-center">
-    <h1 class="text-4xl md:text-5xl font-extrabold tracking-wide" style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial;">
+    <h1
+      class="text-5xl md:text-6xl font-bold tracking-tight bg-gradient-to-r from-purple-200 via-white to-indigo-200 text-transparent bg-clip-text"
+      style="font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial;"
+    >
       Kai - Your AI Coach
     </h1>
   </header>
@@ -543,6 +564,7 @@
     <!-- Download Summary -->
     <button
       class="w-11 h-11 rounded-full bg-purple-700 hover:bg-purple-600 transition-colors flex items-center justify-center shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+      class:animate-pulse={conversationEnded}
       on:click={handleDownload}
       disabled={conversationHistory.length === 0}
       aria-label="Download summary"

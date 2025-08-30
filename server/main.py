@@ -209,8 +209,9 @@ async def generate_summary(request: SummaryRequest):
         }
 
         system_prompt = (
-            "You are a highly skilled analyst. Your task is to provide a concise, structured summary of the following coaching conversation. "
-            "Organize the summary into three sections: 'Key Goals', 'Major Breakthroughs', and 'Actionable Next Steps'."
+            "You are a highly skilled analyst. Your task is to provide a concise, well-structured summary of the following coaching conversation. "
+            "**Format the entire summary using Markdown.** Use headings for 'Key Goals', 'Major Breakthroughs', and 'Actionable Next Steps', "
+            "and use bullet points for the items in each section."
         )
 
         messages = [
