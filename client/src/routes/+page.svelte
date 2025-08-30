@@ -39,6 +39,11 @@
   // Mode toggle: Focus Mode (default) vs Hands-Free Mode
   let isHandsFreeMode = false;
 
+  // Track last text the coach spoke (to avoid echo being treated as user input)
+  let lastAIAudioText = '';
+  // Timestamp when listening started
+  let listenStartedAt = 0;
+ 
   // Computed ARIA label for orb based on mode/state
   $: orbAriaLabel = isHandsFreeMode
     ? (isListening ? 'Listening hands-free; auto-stops on silence' : 'Tap to start hands-free listening')
@@ -74,7 +79,7 @@
 
     // If idle and switching to Hands-Free, auto-open the mic
     if (isHandsFreeMode && !speaking && !isListening && !inFlight) {
-        beginListening(true);
+        scheduleAutoListen();
     }
 
     // Adjust silence timer behavior mid-turn depending on mode
@@ -115,7 +120,13 @@
   // Prompt for mic permission under a user gesture; stop tracks immediately
   async function ensureMicPermission() {
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const s = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
       s.getTracks().forEach(t => t.stop());
       return true;
     } catch (e) {
@@ -128,7 +139,13 @@
     try {
       await ensureAudioCtx();
       // Ask for mic access only when we need it
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
       micSource = audioCtx.createMediaStreamSource(micStream);
       micAnalyser = audioCtx.createAnalyser();
       micAnalyser.fftSize = 1024;
@@ -165,11 +182,14 @@
 
   // Auto-stop configuration
   // Hands‑Free uses a short silence timeout; Focus (Tap) mode does not auto-stop on silence.
-  const HANDS_FREE_SILENCE_TIMEOUT_MS = 2500; // ~2.5s silence
+  const HANDS_FREE_SILENCE_TIMEOUT_MS = 3500; // ~3.5s after speech activity
+  const INITIAL_HANDS_FREE_GRACE_MS = 4500;   // extra time right after coach finishes
+  const COACH_TO_MIC_DELAY_MS = 800;          // small delay before opening mic after AI audio
   const MAX_LISTEN_MS = 30000;     // hard cap: 30s per turn
 
   let silenceTimer = null;
   let maxListenTimer = null;
+  let awaitingFirstSpeech = false;
 
   function clearTimers() {
     if (silenceTimer) {
@@ -188,13 +208,14 @@
     if (!isHandsFreeMode) {
       return;
     }
+    const timeoutMs = awaitingFirstSpeech ? INITIAL_HANDS_FREE_GRACE_MS : HANDS_FREE_SILENCE_TIMEOUT_MS;
     silenceTimer = setTimeout(() => {
       if (isListening && !inFlight) {
         // Trigger stop+process on prolonged silence
         isListening = false;
         handleOrbRelease();
       }
-    }, HANDS_FREE_SILENCE_TIMEOUT_MS);
+    }, timeoutMs);
   }
 
   function armMaxListenTimer() {
@@ -217,6 +238,30 @@
 
   function toggleHistory() {
     isHistoryOpen = !isHistoryOpen;
+  }
+
+  // Normalize text for simple similarity checks
+  function normalizeText(s) {
+    return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  // Heuristic to detect if user's transcript is likely an echo of AI speech
+  function looksLikeEcho(userText, aiText) {
+    if (!userText || !aiText) return false;
+    const a = normalizeText(userText);
+    const b = normalizeText(aiText);
+    if (!a || !b) return false;
+    // Require some length for meaningful comparison
+    if (a.length < 12) return false;
+    // Check if user text is contained within AI text (common echo case)
+    if (b.includes(a)) return true;
+    // Check if user shares a long prefix with AI
+    const prefix = b.slice(0, Math.min(40, b.length));
+    if (a.length >= 12 && prefix.includes(a)) return true;
+    // Check if user starts with AI prefix
+    const userPrefix = a.slice(0, Math.min(30, a.length));
+    if (b.startsWith(userPrefix)) return true;
+    return false;
   }
 
   // Resolver used to await recognition.onend when stopping recognition
@@ -293,16 +338,25 @@
 
     recognition.onresult = (event) => {
       let tempInterim = '';
+      let capturedAny = false;
       // Do NOT reset finalTranscript here — keep accumulated final text across short pauses.
       for (let i = event.resultIndex; i < event.results.length; ++i) {
         if (event.results[i].isFinal) {
           finalTranscript += event.results[i][0].transcript;
+          capturedAny = true;
         } else {
-          tempInterim += event.results[i][0].transcript;
+          const chunk = event.results[i][0].transcript;
+          tempInterim += chunk;
+          if (chunk && chunk.trim().length > 0) capturedAny = true;
         }
       }
       interimTranscript = tempInterim;
-
+ 
+      if (capturedAny) {
+        // Once we detect the user's voice, revert to normal silence timeout
+        awaitingFirstSpeech = false;
+      }
+ 
       // Any incoming audio resets the silence timer
       armSilenceTimer();
     };
@@ -359,12 +413,24 @@
       // Reset transcripts for a new turn
       interimTranscript = '';
       finalTranscript = '';
+      // In auto hands‑free starts, allow an initial grace window before auto-stop
+      awaitingFirstSpeech = !!(auto && isHandsFreeMode);
+      listenStartedAt = Date.now();
       // Optionally start a mic visualizer
       try { await startMicViz(); } catch {}
       recognition.start();
       status = isHandsFreeMode ? 'Speak now' : 'Tap to Stop';
     } catch (e) {
       console.warn('Failed to start listening', e);
+    }
+  }
+
+  // Schedule mic opening after AI finishes speaking to avoid pickup/echo
+  function scheduleAutoListen() {
+    if (isHandsFreeMode && !isListening && !inFlight) {
+      setTimeout(() => beginListening(true), COACH_TO_MIC_DELAY_MS);
+    } else {
+      status = 'Tap to Speak';
     }
   }
 
@@ -437,7 +503,23 @@
       inFlight = false;
       return;
     }
-
+ 
+    // Guard against picking up the coach's speech as the user's reply (echo)
+    if (isHandsFreeMode) {
+      const normalizedAI = normalizeText(lastAIAudioText);
+      const normalizedUser = normalizeText(capturedTranscript);
+      const shortOrEcho =
+        normalizedUser.length < 8 ||
+        looksLikeEcho(normalizedUser, normalizedAI);
+      if (shortOrEcho) {
+        console.log('Discarding likely echo/too‑short transcript; continuing to listen.');
+        status = 'Speak now';
+        inFlight = false;
+        beginListening(true);
+        return;
+      }
+    }
+ 
     const userMessage = { role: 'user', text: capturedTranscript };
     conversationHistory = [...conversationHistory, userMessage];
     setSubtitleFromHistory();
@@ -454,9 +536,11 @@
       }
 
       const data = await response.json();
+// Append model reply only if it's not already the last entry
+const aiMessage = { role: 'model', text: data.text };
+// Remember what the coach will speak to help filter echoes on next turn
+lastAIAudioText = data.text || '';
 
-      // Append model reply only if it's not already the last entry
-      const aiMessage = { role: 'model', text: data.text };
 
       // Detect conclusion phrases to highlight download button (case-insensitive)
       const lc = (data.text || '').toLowerCase();
@@ -479,7 +563,7 @@
             // After each AI turn finishes
             hasGreeted = true;
             if (isHandsFreeMode && !isListening && !inFlight) {
-              beginListening(true);
+              scheduleAutoListen();
             } else {
               status = 'Tap to Speak';
             }
@@ -488,7 +572,7 @@
           // No audio available (e.g., TTS quota). Continue flow silently.
           hasGreeted = true;
           if (isHandsFreeMode && !isListening && !inFlight) {
-            beginListening(true);
+            scheduleAutoListen();
           } else {
             status = 'Tap to Speak';
           }
@@ -642,6 +726,8 @@
       const greeting = "Hello, I'm Kai. It's good to hear from you. What's on your mind today?";
       // Show greeting in subtitle and history
       const aiGreeting = { role: 'model', text: greeting };
+      // Track last AI spoken text to reduce echo mis-detections
+      lastAIAudioText = greeting;
       conversationHistory = [...conversationHistory, aiGreeting];
       // Push to floating subtitles
       const last = conversationHistory[conversationHistory.length - 1];
@@ -661,7 +747,7 @@
           hasGreeted = true;
           if (isHandsFreeMode && !isListening && !inFlight) {
             // Auto-open mic after greeting in Hands‑Free
-            beginListening(true);
+            scheduleAutoListen();
           } else {
             status = 'Tap to Speak';
           }
