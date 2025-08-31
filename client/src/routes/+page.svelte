@@ -43,6 +43,10 @@
   // Mode toggle: Focus Mode (default) vs Hands-Free Mode
   let isHandsFreeMode = false;
 
+  // Speech recognition availability + user-facing warning message
+  let srSupported = false;
+  let speechWarning = '';
+
   // Track last text the coach spoke (to avoid echo being treated as user input)
   let lastAIAudioText = '';
   // Timestamp when listening started
@@ -336,6 +340,7 @@
 
   if (typeof window !== 'undefined') {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    srSupported = !!SpeechRecognition;
     recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
@@ -394,14 +399,15 @@
     };
 
     recognition.onerror = (event) => {
-      console.error('Speech recognition error', event.error);
-      // If the recognition engine reports a transient network error, don't immediately flip the UI
-      // to "not listening" — keep the orb state stable so users can retry by tapping again.
-      if (event && event.error === 'network') {
-        // Show a gentle status but preserve isListening so UI doesn't instantly close
-        status = hasGreeted ? 'Tap to Speak' : 'Tap to Start';
-        // Do not force isListening = false here to avoid an immediate visual flip
-        return;
+      console.warn('Speech recognition error', event?.error);
+      const err = event?.error || '';
+      if (err === 'network') {
+        // Common on Brave/Ad‑blockers which block Google speech endpoints
+        speechWarning = 'Browser blocked Speech Recognition (often Brave Shields or an ad‑blocker). Disable Shields for this site or use Chrome.';
+      } else if (err === 'not-allowed' || err === 'permission-denied') {
+        speechWarning = 'Microphone permission is blocked. Allow mic access in site settings and reload.';
+      } else if (err === 'no-speech' || err === 'aborted') {
+        // non-fatal; user paused or engine stopped
       }
       isListening = false;
       status = hasGreeted ? 'Tap to Speak' : 'Tap to Start';
@@ -814,6 +820,12 @@ lastAIAudioText = data.text || '';
       Kai - Your AI Coach
     </h1>
   </header>
+
+  {#if speechWarning}
+    <div class="mx-auto mt-2 max-w-3xl text-sm text-amber-200 bg-amber-900/40 border border-amber-700 rounded px-3 py-2">
+      {speechWarning}
+    </div>
+  {/if}
 
   <!-- Centered Orb and Floating Subtitles -->
   <main class="flex-1 flex flex-col items-center justify-center relative">
