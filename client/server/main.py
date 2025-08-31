@@ -2,19 +2,18 @@ import os
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from elevenlabs.client import ElevenLabs
 import uuid
+import io
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
  
-# PDF generation (simple Markdown-ish rendering)
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
+# PDF generation imports are intentionally deferred inside the /api/summary_pdf
+# endpoint to avoid import-time failures in serverless (e.g., missing native deps).
+# See lazy import inside generate_summary_pdf().
 
 # Load environment variables
 load_dotenv()
@@ -304,10 +303,20 @@ async def generate_summary_pdf(request: SummaryRequest):
 
         # 2) Convert basic Markdown to a simple PDF
         file_name = f"{uuid.uuid4()}.pdf"
-        file_path = f"server/static/docs/{file_name}"
+        # Use in-memory buffer because serverless filesystems are read-only
+        buffer = io.BytesIO()
 
+        # Lazy import so other routes work even if ReportLab isn't present
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import colors
+        except Exception as e:
+            raise HTTPException(status_code=503, detail="PDF generation is unavailable in this environment.") from e
+        
         styles = getSampleStyleSheet()
-        doc = SimpleDocTemplate(file_path, pagesize=letter, title="Kai Session Summary")
+        doc = SimpleDocTemplate(buffer, pagesize=letter, title="Kai Session Summary")
         flow = []
 
         def add_paragraph(text, style=styles["BodyText"], space=6):
@@ -355,9 +364,16 @@ async def generate_summary_pdf(request: SummaryRequest):
             bullets.clear()
 
         doc.build(flow)
+        buffer.seek(0)
 
-        pdf_url = f"/api/static/docs/{file_name}"
-        return {"pdf_url": pdf_url}
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{file_name}"',
+                "Cache-Control": "no-store"
+            }
+        )
 
     except Exception as e:
         print(f"PDF summary error: {e}")

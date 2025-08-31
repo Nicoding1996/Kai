@@ -25,6 +25,10 @@ High-quality personal coaching is often expensive and unavailable on demand. Kai
 - Generated audio files saved to `server/static/audio/` and PDFs to `server/static/docs/`
 - Graceful degradation when TTS is unavailable — conversation text still returns
 
+### browsers compatibility and important notes
+This application uses the Web Speech API for real-time voice recognition. This is an experimental browser technology that is currently best supported by desktop versions of Google Chrome.
+For the best experience, please use Google Chrome to view the live demo. If you are using the Brave browser, you must disable Shields for this site for the speech recognition to function correctly.
+
 ## 🛠️ Tech stack
 
 - Frontend: SvelteKit, Tailwind CSS

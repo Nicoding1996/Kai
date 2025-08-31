@@ -2,11 +2,12 @@ import os
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from elevenlabs.client import ElevenLabs
 import uuid
+import io
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
  
@@ -302,8 +303,9 @@ async def generate_summary_pdf(request: SummaryRequest):
 
         # 2) Convert basic Markdown to a simple PDF
         file_name = f"{uuid.uuid4()}.pdf"
-        file_path = f"server/static/docs/{file_name}"
-
+        # Write to an in-memory buffer to avoid read-only filesystem on serverless platforms
+        buffer = io.BytesIO()
+        
         # Lazy import of ReportLab here so /api/tts (and other routes) work even if
         # ReportLab isn't available in the serverless environment.
         try:
@@ -316,7 +318,7 @@ async def generate_summary_pdf(request: SummaryRequest):
             raise HTTPException(status_code=503, detail="PDF generation is unavailable in this environment.") from e
         
         styles = getSampleStyleSheet()
-        doc = SimpleDocTemplate(file_path, pagesize=letter, title="Kai Session Summary")
+        doc = SimpleDocTemplate(buffer, pagesize=letter, title="Kai Session Summary")
         flow = []
 
         def add_paragraph(text, style=styles["BodyText"], space=6):
@@ -364,9 +366,16 @@ async def generate_summary_pdf(request: SummaryRequest):
             bullets.clear()
 
         doc.build(flow)
-
-        pdf_url = f"/api/static/docs/{file_name}"
-        return {"pdf_url": pdf_url}
+        buffer.seek(0)
+        
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{file_name}"',
+                "Cache-Control": "no-store"
+            }
+        )
 
     except Exception as e:
         print(f"PDF summary error: {e}")

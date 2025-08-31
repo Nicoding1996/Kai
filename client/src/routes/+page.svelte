@@ -707,6 +707,7 @@ lastAIAudioText = data.text || '';
   }
 
   // Download session summary as a PDF file (server-rendered)
+  // Back-end now returns the PDF bytes directly (no intermediate file URL).
   async function handleDownloadPdf() {
     try {
       if (!conversationEnded || downloading) return;
@@ -719,17 +720,10 @@ lastAIAudioText = data.text || '';
       });
 
       if (!response.ok) {
-        throw new Error(`Network response was not ok: ${response.statusText}`);
+        throw new Error(`Network response was not ok: ${response.status} ${response.statusText}`);
       }
 
-      const data = await response.json();
-      const pdfUrl = data.pdf_url;
-      if (!pdfUrl) throw new Error('No pdf_url returned from server');
-
-      // Fetch the PDF as a blob so we can force a download (cross-origin safe)
-      const pdfRes = await fetch(`${backendUrl}${pdfUrl}`);
-      if (!pdfRes.ok) throw new Error('Failed to fetch generated PDF');
-      const blob = await pdfRes.blob();
+      const blob = await response.blob();
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement('a');
