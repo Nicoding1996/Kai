@@ -4,9 +4,6 @@
 
 ## 🚀 Live demo & demo video
 
-- Live: [LINK_TO_YOUR_VERCEL_DEPLOYMENT]
-- Demo video: [LINK_TO_YOUR_YOUTUBE_VIDEO]
-
 ---
 
 ## Overview
