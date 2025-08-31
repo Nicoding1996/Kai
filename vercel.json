@@ -1,8 +1,9 @@
 {
+  "version": 2,
   "builds": [
     {
       "src": "client/package.json",
-      "use": "@sveltejs/adapter-vercel"
+      "use": "@vercel/static-build"
     },
     {
       "src": "server/main.py",

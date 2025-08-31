@@ -12,6 +12,8 @@
 
   // Track whether we've already greeted (affects orb label flow)
   let hasGreeted = false;
+  // If TTS is unavailable in production, disable TTS-related flows
+  let ttsDisabled = false;
 
   // Prevent duplicate submits and duplicate audio
   let inFlight = false;
@@ -393,6 +395,14 @@
 
     recognition.onerror = (event) => {
       console.error('Speech recognition error', event.error);
+      // If the recognition engine reports a transient network error, don't immediately flip the UI
+      // to "not listening" — keep the orb state stable so users can retry by tapping again.
+      if (event && event.error === 'network') {
+        // Show a gentle status but preserve isListening so UI doesn't instantly close
+        status = hasGreeted ? 'Tap to Speak' : 'Tap to Start';
+        // Do not force isListening = false here to avoid an immediate visual flip
+        return;
+      }
       isListening = false;
       status = hasGreeted ? 'Tap to Speak' : 'Tap to Start';
     };
@@ -738,20 +748,34 @@ lastAIAudioText = data.text || '';
         currentSubtitle = last.text;
       }
       // Request TTS from backend
-      const res = await fetch(`${backendUrl}/api/tts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: greeting })
-      });
-      if (res.ok) {
-        const { audio_url } = await res.json();
-        await playAudioFromUrl(`${backendUrl}${audio_url}`, () => {
-          hasGreeted = true;
-          // Do NOT auto-open mic after the initial greeting to avoid echo.
-          status = 'Tap to Speak';
+      // Attempt to request TTS from the backend. If the backend is unreachable or returns 404,
+      // mark TTS disabled and continue — don't block the UI or listening flow.
+      try {
+        const res = await fetch(`${backendUrl}/api/tts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: greeting })
         });
-      } else {
-        // If TTS fails, still advance UI
+        if (res.ok) {
+          const { audio_url } = await res.json();
+          await playAudioFromUrl(`${backendUrl}${audio_url}`, () => {
+            hasGreeted = true;
+            // Do NOT auto-open mic after the initial greeting to avoid echo.
+            status = 'Tap to Speak';
+          });
+        } else {
+          // If the server returns 404 (or other non-ok), disable TTS for this session and continue.
+          if (res.status === 404) {
+            console.warn('/api/tts returned 404 — disabling TTS for this session');
+            ttsDisabled = true;
+          }
+          hasGreeted = true;
+          status = 'Tap to Speak';
+        }
+      } catch (e) {
+        // Network error — disable TTS and continue without audio
+        console.warn('TTS fetch failed, disabling TTS for this session:', e);
+        ttsDisabled = true;
         hasGreeted = true;
         status = 'Tap to Speak';
       }
