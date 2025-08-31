@@ -568,10 +568,18 @@ lastAIAudioText = data.text || '';
       }
       setSubtitleFromHistory();
 
-      // Play audio once: stop any previous playback first
+      // Play audio once: request streaming TTS for the AI text
       try {
-        if (data.audio_url) {
-          await playAudioFromUrl(`${backendUrl}${data.audio_url}`, () => {
+        const ttsRes = await fetch(`${backendUrl}/api/tts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: data.text || '' })
+        });
+        if (ttsRes.ok) {
+          const blob = await ttsRes.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          await playAudioFromUrl(objectUrl, () => {
+            URL.revokeObjectURL(objectUrl);
             // After each AI turn finishes
             hasGreeted = true;
             if (isHandsFreeMode && !isListening && !inFlight) {
@@ -581,7 +589,7 @@ lastAIAudioText = data.text || '';
             }
           });
         } else {
-          // No audio available (e.g., TTS quota). Continue flow silently.
+          // No audio available (e.g., TTS quota/unavailable). Continue flow silently.
           hasGreeted = true;
           if (isHandsFreeMode && !isListening && !inFlight) {
             scheduleAutoListen();
@@ -590,7 +598,7 @@ lastAIAudioText = data.text || '';
           }
         }
       } catch (e) {
-        console.error('Error playing audio', e);
+        console.error('Error requesting/playing TTS audio', e);
       }
     } catch (error) {
       console.error('There was a problem with the fetch operation:', error);
@@ -757,8 +765,10 @@ lastAIAudioText = data.text || '';
           body: JSON.stringify({ text: greeting })
         });
         if (res.ok) {
-          const { audio_url } = await res.json();
-          await playAudioFromUrl(`${backendUrl}${audio_url}`, () => {
+          const blob = await res.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          await playAudioFromUrl(objectUrl, () => {
+            URL.revokeObjectURL(objectUrl);
             hasGreeted = true;
             // Do NOT auto-open mic after the initial greeting to avoid echo.
             status = 'Tap to Speak';
