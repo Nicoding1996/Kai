@@ -1,16 +1,12 @@
 {
-  "version": 2,
   "builds": [
+    {
+      "src": "client/package.json",
+      "use": "@sveltejs/adapter-vercel"
+    },
     {
       "src": "server/main.py",
       "use": "@vercel/python"
-    },
-    {
-      "src": "client/package.json",
-      "use": "@vercel/static-build",
-      "config": {
-        "distDir": "build"
-      }
     }
   ],
   "routes": [
