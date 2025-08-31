@@ -10,11 +10,9 @@ import uuid
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
  
-# PDF generation (simple Markdown-ish rendering)
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
+# PDF generation imports are intentionally deferred inside the /api/summary_pdf
+# endpoint to avoid import-time failures in serverless (e.g., missing native deps).
+# See lazy import inside generate_summary_pdf().
 
 # Load environment variables
 load_dotenv()
@@ -306,6 +304,17 @@ async def generate_summary_pdf(request: SummaryRequest):
         file_name = f"{uuid.uuid4()}.pdf"
         file_path = f"server/static/docs/{file_name}"
 
+        # Lazy import of ReportLab here so /api/tts (and other routes) work even if
+        # ReportLab isn't available in the serverless environment.
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import colors
+        except Exception as e:
+            # If ReportLab cannot be imported on Vercel, fail gracefully with a clear error.
+            raise HTTPException(status_code=503, detail="PDF generation is unavailable in this environment.") from e
+        
         styles = getSampleStyleSheet()
         doc = SimpleDocTemplate(file_path, pagesize=letter, title="Kai Session Summary")
         flow = []
