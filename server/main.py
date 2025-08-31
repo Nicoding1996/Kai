@@ -75,6 +75,8 @@ elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
 # --- Static File Serving ---
 app.mount("/static", StaticFiles(directory="server/static"), name="static")
+# Also mount under /api/static so Vercel routes through the Python Function can serve these files
+app.mount("/api/static", StaticFiles(directory="server/static"), name="static_api")
 
 # --- Pydantic Models ---
 class ConversationRequest(BaseModel):
@@ -354,7 +356,7 @@ async def generate_summary_pdf(request: SummaryRequest):
 
         doc.build(flow)
 
-        pdf_url = f"/static/docs/{file_name}"
+        pdf_url = f"/api/static/docs/{file_name}"
         return {"pdf_url": pdf_url}
 
     except Exception as e:
