@@ -1,6 +1,8 @@
 <script>
   import { onMount } from 'svelte';
-
+  import { dev } from '$app/environment';
+  const backendUrl = dev ? 'http://localhost:8000' : '';
+ 
   let recognition;
   let interimTranscript = '';
   let finalTranscript = '';
@@ -525,7 +527,7 @@
     setSubtitleFromHistory();
 
     try {
-      const response = await fetch('http://localhost:8000/api/conversation', {
+      const response = await fetch(`${backendUrl}/api/conversation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: capturedTranscript, history: conversationHistory })
@@ -559,7 +561,7 @@ lastAIAudioText = data.text || '';
       // Play audio once: stop any previous playback first
       try {
         if (data.audio_url) {
-          await playAudioFromUrl(`http://localhost:8000${data.audio_url}`, () => {
+          await playAudioFromUrl(`${backendUrl}${data.audio_url}`, () => {
             // After each AI turn finishes
             hasGreeted = true;
             if (isHandsFreeMode && !isListening && !inFlight) {
@@ -649,7 +651,7 @@ lastAIAudioText = data.text || '';
       if (!conversationEnded || downloading) return;
       downloading = true;
 
-      const response = await fetch('http://localhost:8000/api/summary', {
+      const response = await fetch(`${backendUrl}/api/summary`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ history: conversationHistory })
@@ -686,7 +688,7 @@ lastAIAudioText = data.text || '';
       if (!conversationEnded || downloading) return;
       downloading = true;
 
-      const response = await fetch('http://localhost:8000/api/summary_pdf', {
+      const response = await fetch(`${backendUrl}/api/summary_pdf`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ history: conversationHistory })
@@ -701,7 +703,7 @@ lastAIAudioText = data.text || '';
       if (!pdfUrl) throw new Error('No pdf_url returned from server');
 
       // Fetch the PDF as a blob so we can force a download (cross-origin safe)
-      const pdfRes = await fetch(`http://localhost:8000${pdfUrl}`);
+      const pdfRes = await fetch(`${backendUrl}${pdfUrl}`);
       if (!pdfRes.ok) throw new Error('Failed to fetch generated PDF');
       const blob = await pdfRes.blob();
       const url = URL.createObjectURL(blob);
@@ -736,14 +738,14 @@ lastAIAudioText = data.text || '';
         currentSubtitle = last.text;
       }
       // Request TTS from backend
-      const res = await fetch('http://localhost:8000/api/tts', {
+      const res = await fetch(`${backendUrl}/api/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: greeting })
       });
       if (res.ok) {
         const { audio_url } = await res.json();
-        await playAudioFromUrl(`http://localhost:8000${audio_url}`, () => {
+        await playAudioFromUrl(`${backendUrl}${audio_url}`, () => {
           hasGreeted = true;
           // Do NOT auto-open mic after the initial greeting to avoid echo.
           status = 'Tap to Speak';
